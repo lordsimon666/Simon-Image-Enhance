@@ -22,13 +22,17 @@ gespeichert und erst beim Export angewendet.
 
 Läuft komplett offline auf deinem Rechner, ohne Cloud.
 
-1. **Weißabgleich:** Sucht Flächen im Bild, deren Farbe auf der Kurve physikalisch möglicher
-   Lichtquellen liegt (Schwarzkörper 2000–14000 K) – das sind fast immer neutrale Oberflächen
-   (Wände, Wolken, Straße, Papier). Das Ergebnis wird je nach Sicherheit mit klassischen
-   Farbkonstanz-Verfahren kombiniert (Gray-World, Shades-of-Gray, Gray-Edge, White-Patch).
-   Bei sehr warmem/kaltem Licht (Sonnenuntergang, Kerzenlicht) bleibt etwas Stimmung erhalten.
-2. **Kurven:** Aus dem Histogramm werden Schwarz-/Weißpunkt, Mitteltöne und ein angepasster
-   S-Kontrast bestimmt; Farbstiche in Tiefen und Lichtern werden über die R/G/B-Kurven entfernt.
+1. **Weißabgleich:** Sucht Flächen im Bild, deren Farbe zu einer physikalisch möglichen
+   Lichtquelle passt (Schwarzkörper 2000–14000 K, leichte Grün/Magenta-Abweichung erlaubt) –
+   das sind fast immer neutrale Oberflächen (Wände, Wolken, Straße, Papier). Gewählt wird die
+   *dominante* Lichtquelle, nicht ein Mittelwert. Stark gesättigte Bereiche (Monitore, LEDs)
+   werden ignoriert. Wie stark korrigiert wird, hängt von der Sicherheit ab: Bei Mischlicht
+   oder wenig neutralen Flächen korrigiert die KI vorsichtiger, und bei sehr warmem/kaltem
+   Licht (Sonnenuntergang, Kerzenlicht) bleibt etwas Stimmung erhalten.
+2. **Kurven:** Aus dem Histogramm werden Schwarz-/Weißpunkt, Mitteltöne (behutsam, damit
+   Abend- und Low-Key-Bilder ihre Stimmung behalten) und ein angepasster S-Kontrast bestimmt.
+   Farbstiche in Tiefen und Lichtern werden über die R/G/B-Kurven entfernt – gemessen nur an
+   neutralen Bildbereichen, damit z. B. ein blauer Himmel nicht als Farbstich gilt.
 
 ## Downloads
 

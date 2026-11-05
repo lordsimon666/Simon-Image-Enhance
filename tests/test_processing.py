@@ -185,3 +185,52 @@ def test_renderer_tiled_matches():
     lin = synthetic_scene(size=(300, 200))
     r = Renderer(Params(contrast=20, vibrance=30))
     assert np.allclose(r.apply(lin.copy()), r.apply_tiled(lin, rows=64))
+
+
+# --- regressions found with real photos -------------------------------------
+
+def _patch(img, y0, y1, x0, x1):
+    m = img[y0:y1, x0:x1].reshape(-1, 3).mean(axis=0)
+    return m.max() / m.min()
+
+
+def test_ai_keeps_neutral_ground_neutral_under_blue_sky():
+    """Per-channel highlight curves must not push a neutral scene blue
+    (bug: wrong sign in the highlight cast removal)."""
+    h, w = 240, 360
+    img = np.zeros((h, w, 3), np.float32)
+    img[: h // 3] = (0.30, 0.42, 0.75)          # bright blue dusk sky
+    img[h // 3:] = 0.16                         # neutral asphalt
+    img[h // 3:, 200:260] = 0.62                # neutral white car
+    p = ai_correct(img, Params())
+    out = render(img, p)
+    assert _patch(out, 200, 230, 20, 180) < 1.03
+    assert _patch(out, 100, 200, 205, 255) < 1.03
+
+
+def test_ai_ignores_saturated_screen_and_led():
+    """A bright green monitor and a blue LED must not produce a strong tint."""
+    h, w = 240, 360
+    img = np.full((h, w, 3), 0.05, np.float32)  # dark desk mat
+    img[:80, 200:] = (0.05, 0.85, 0.55)          # green/cyan screen
+    img[200:, :60] = (0.02, 0.05, 0.9)           # blue LED glow
+    img[100:180, 80:260] = 0.55                  # grey model car
+    img[:80, :200] = (0.55, 0.32, 0.15)          # warm wooden desk
+    p = ai_correct(img, Params())
+    assert abs(p.tint) < 15, p.tint
+    assert _patch(render(img, p), 110, 170, 90, 250) < 1.05
+
+
+def test_ai_mixed_light_is_conservative():
+    """When grey candidates split between two light sources the correction is
+    milder than a full neutralisation of either."""
+    from simon_enhance.auto import estimate_illuminant_conf
+    from simon_enhance.processing import blackbody_rgb
+    h, w = 200, 300
+    warm = blackbody_rgb(4300) / blackbody_rgb(NEUTRAL_TEMP)
+    cool = blackbody_rgb(11000) / blackbody_rgb(NEUTRAL_TEMP)
+    img = np.zeros((h, w, 3), np.float32)
+    img[:, :150] = 0.25 * warm / warm[1]
+    img[:, 150:] = 0.25 * cool / cool[1]
+    _, conf = estimate_illuminant_conf(img)
+    assert conf < 0.8

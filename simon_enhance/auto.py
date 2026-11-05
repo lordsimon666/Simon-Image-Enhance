@@ -36,6 +36,7 @@ def _chroma(v: np.ndarray) -> np.ndarray:
 
 
 _LOCUS = None
+_DEBUG = False
 
 
 def _locus():
@@ -50,7 +51,7 @@ def _locus():
     return _LOCUS
 
 
-def _statistical_estimate(img, v, lv):
+def _statistical_estimate(img, v, lv, grad_mask=None):
     """Classic colour-constancy estimators combined in log-chroma space."""
     estimates = [
         (v.mean(axis=0), 0.15),                                    # grey world
@@ -71,36 +72,89 @@ def _statistical_estimate(img, v, lv):
     return chroma / max(wsum, 1e-9)
 
 
+_GRID = None
+_TINT_STEPS = np.linspace(-0.075, 0.075, 7)  # log green offset of the light source
+
+
+def _grid():
+    """2-D grid of candidate light sources: Planckian temperature x tint offset."""
+    global _GRID
+    if _GRID is None:
+        temps = 1e6 / np.linspace(1e6 / 2000.0, 1e6 / 14000.0, 64)
+        ref = blackbody_rgb(NEUTRAL_TEMP)
+        base = np.array([_chroma(blackbody_rgb(t) / ref)[[0, 2]] for t in temps])
+        # more green in the light lowers both log(r/g) and log(b/g)
+        pts = base[:, None, :] - _TINT_STEPS[None, :, None]
+        _GRID = (temps, pts.reshape(-1, 2).astype(np.float32))
+    return _GRID
+
+
 def _grey_pixel_estimate(pix_chroma, lv):
-    """Find pixels whose colour lies on the locus of physically plausible light
-    sources - these are most likely achromatic surfaces (walls, clouds, asphalt,
-    paper ...) lit by the scene illuminant. Returns (chroma, confidence)."""
-    temps, locus = _locus()
+    """Find pixels whose colour matches a physically plausible light source
+    (black body 2000-14000 K, with a moderate green/magenta offset) - these are most
+    likely achromatic surfaces (walls, clouds, asphalt, paper ...) lit by the scene
+    illuminant. Returns (chroma, confidence)."""
+    if len(pix_chroma) > 24000:  # keep the N x grid distance matrix small
+        step = int(math.ceil(len(pix_chroma) / 24000))
+        pix_chroma, lv = pix_chroma[::step], lv[::step]
+    temps, grid = _grid()
+    nt, ns = len(temps), len(_TINT_STEPS)
     c = pix_chroma[:, [0, 2]].astype(np.float32)
-    d = np.sqrt(((c[:, None, :] - locus[None, :, :]) ** 2).sum(-1))  # N x L
+    d = np.sqrt(((c[:, None, :] - grid[None, :, :]) ** 2).sum(-1))  # N x (nt*ns)
     k = d.argmin(axis=1)
     dist = d[np.arange(len(c)), k]
-    sel = dist < 0.07
+    sel = dist < 0.06
     if sel.sum() < 20:
         return None, 0.0
-    w = (np.clip(lv[sel], 0.02, 0.9) ** 0.5) * (1.0 - dist[sel] / 0.07)
-    # robust: weighted median position along the locus (in mired) ...
-    mired = 1e6 / temps[k[sel]]
-    order = np.argsort(mired)
-    cw = np.cumsum(w[order])
-    med = mired[order][np.searchsorted(cw, cw[-1] / 2)]
-    # ... then average the chroma of the candidates near that median
-    near = np.abs(mired - med) < 25
+    it, is_ = k[sel] // ns, k[sel] % ns
+    mired = 1e6 / temps[it]
+    tint = _TINT_STEPS[is_]
+    # brighter surfaces are more reliable; mild priors favour common light sources
+    # (near daylight, near the Planckian locus). They only matter when candidates
+    # disagree, e.g. a wooden desk that looks like "grey under tungsten".
+    prior_t = np.exp(-0.5 * ((mired - 1e6 / NEUTRAL_TEMP) / 110.0) ** 2)
+    prior_s = np.exp(-0.5 * (tint / 0.035) ** 2)
+    w_raw = np.clip(lv[sel], 0.02, 0.9) * (1.0 - dist[sel] / 0.06)
+    w = w_raw * (0.25 + 0.75 * prior_t) * (0.05 + 0.95 * prior_s)
+    # robust: dominant mode of the smoothed 2-D distribution. (A median would land
+    # between two light sources in mixed lighting.)
+    hist = np.zeros((nt, ns))
+    np.add.at(hist, (it, is_), w)
+    kt = np.exp(-0.5 * (np.arange(-4, 5) / 2.0) ** 2)
+    ks = np.exp(-0.5 * (np.arange(-2, 3) / 1.0) ** 2)
+    hist = np.apply_along_axis(lambda r: np.convolve(r, kt, mode="same"), 0, hist)
+    hist = np.apply_along_axis(lambda r: np.convolve(r, ks, mode="same"), 1, hist)
+    mt, ms = np.unravel_index(int(np.argmax(hist)), hist.shape)
+    # ... then average the chroma of the candidates near that mode
+    near = (np.abs(it - mt) <= 4) & (np.abs(is_ - ms) <= 1)
     if near.sum() < 10:
-        near = np.ones_like(mired, dtype=bool)
+        near = np.ones_like(it, dtype=bool)
     chroma = np.average(pix_chroma[sel][near], axis=0, weights=w[near])
-    # ~1.5 % of the image being plausible grey surfaces already gives full confidence
-    confidence = float(np.clip(w[near].sum() / (len(lv) * 0.015), 0.0, 1.0))
+    # amount: ~1.5 % of the image being plausible grey surfaces is plenty
+    n_good = int((lv[sel][near] > 0.04).sum())
+    amount = float(np.clip(n_good / (len(lv) * 0.015), 0.0, 1.0))
+    # unanimity: in mixed light the candidates split between light sources
+    concentration = float(w[near].sum() / max(w.sum(), 1e-9))
+    unanimity = float(np.clip((concentration - 0.25) / 0.4, 0.0, 1.0))
+    confidence = amount * unanimity
+    # a best match at the edge of the tint range is suspicious: typically large
+    # coloured areas (foliage!) mimicking grey under strangely tinted light
+    if abs(_TINT_STEPS[ms]) >= 0.07:
+        confidence *= 0.3
+    if _DEBUG:
+        print(f"grey-pixel: mode {temps[mt]:.0f} K tint {_TINT_STEPS[ms]:+.2f}  amount {amount:.2f} "
+              f"concentration {concentration:.2f} -> conf {confidence:.2f}")
     return chroma, confidence
 
 
 def estimate_illuminant(linear: np.ndarray) -> np.ndarray:
     """Return the estimated scene illuminant as linear RGB (G normalised to 1)."""
+    return estimate_illuminant_conf(linear)[0]
+
+
+def estimate_illuminant_conf(linear: np.ndarray) -> tuple[np.ndarray, float]:
+    """Estimated illuminant plus a confidence 0..1 (how many reliable grey
+    surfaces supported the estimate)."""
     img = _downsample(linear, 256)
     px = img.reshape(-1, 3).astype(np.float64)
     lum = px @ LUM_WEIGHTS
@@ -108,25 +162,47 @@ def estimate_illuminant(linear: np.ndarray) -> np.ndarray:
     if valid.sum() < 50:
         valid = lum > 0
     if valid.sum() < 10:
-        return np.ones(3)
+        return np.ones(3), 0.0
     v = px[valid]
     lv = lum[valid]
 
-    stat = _statistical_estimate(img, v, lv)
-    grey, conf = _grey_pixel_estimate(_chroma(v), lv)
+    pix_chroma = _chroma(v)
+    # Strongly coloured pixels (screens, LEDs, neon, saturated objects) cannot be
+    # lit surfaces of a neutral colour - keep them out of the statistical estimators.
+    temps, locus = _locus()
+    c2 = pix_chroma[:, [0, 2]].astype(np.float32)
+    dmin = np.sqrt(((c2[:, None, :] - locus[None, :, :]) ** 2).sum(-1)).min(axis=1)
+    calm = dmin < 0.35
+    if calm.sum() >= max(50, 0.1 * len(v)):
+        stat = _statistical_estimate(img, v[calm], lv[calm], grad_mask=None)
+    else:
+        stat = _statistical_estimate(img, v, lv)
+
+    grey, conf = _grey_pixel_estimate(pix_chroma, lv)
     if grey is None:
-        return np.exp(stat)
-    wg = 0.4 + 0.55 * conf  # 0.4 .. 0.95 weight on the grey-pixel estimate
-    return np.exp(wg * grey + (1 - wg) * stat)
+        return np.exp(stat), 0.0
+    wg = 0.25 + 0.7 * conf  # 0.25 .. 0.95 weight on the grey-pixel estimate
+    # when both methods disagree strongly the statistics are usually fooled by a
+    # dominant colour (lawn, sky, a monitor ...) -> trust the grey surfaces
+    disagreement = float(np.hypot(*(grey - stat)[[0, 2]]))
+    if disagreement > 0.2 and conf >= 0.6:
+        wg = max(wg, 0.9)
+    return np.exp(wg * grey + (1 - wg) * stat), conf
 
 
 def auto_white_balance(linear: np.ndarray) -> tuple[float, float]:
-    illum = estimate_illuminant(linear)
+    illum, conf = estimate_illuminant_conf(linear)
     temp, tint = solve_white_balance(illum)
+    # The camera already applied its own white balance ("as shot"). With little
+    # evidence (few reliable grey surfaces, mixed light) we only move part of the
+    # way - a wrong strong correction looks much worse than a mild one.
+    trust = 0.5 + 0.5 * conf
+    mired_ref = 1e6 / NEUTRAL_TEMP
+    temp = 1e6 / (mired_ref + (1e6 / temp - mired_ref) * trust)
+    tint *= trust
     # keep a little of the original mood for very warm / very cool light (sunsets,
     # candle light, blue hour) - photographers rarely want those fully neutralised.
     mired = 1e6 / temp
-    mired_ref = 1e6 / NEUTRAL_TEMP
     shift = mired - mired_ref
     keep = 0.12 if abs(shift) > 60 else 0.0
     temp = 1e6 / (mired_ref + shift * (1 - keep))
@@ -156,7 +232,9 @@ def auto_curves(linear: np.ndarray, params: Params) -> dict:
     ln = np.clip((lum - bp) / (wp - bp), 0, 1)
     med = float(np.clip(np.median(ln), 0.02, 0.98))
     target = 0.46
-    gamma = float(np.clip(math.log(target) / math.log(med), 0.65, 1.5))
+    # move only part of the way to the target so dark / bright moods survive
+    gamma = math.log(target) / math.log(med)
+    gamma = float(np.clip(1.0 + 0.6 * (gamma - 1.0), 0.75, 1.35))
     std = float(ln.std())
     s_amt = float(np.clip((0.21 - std) * 0.35, 0.0, 0.045))
 
@@ -174,16 +252,27 @@ def auto_curves(linear: np.ndarray, params: Params) -> dict:
         master[i][1] = max(master[i][1], master[i - 1][1])
 
     # per-channel shadow / highlight cast removal on the master-corrected image
+    # (measured only on near-neutral pixels - a blue sky or a red car is not a cast)
     corrected = eval_curve(master, px)
-    lo = np.quantile(corrected, 0.01, axis=0)
-    hi = np.quantile(corrected, 0.99, axis=0)
-    lo_m, hi_m = lo.mean(), hi.mean()
+    mx = corrected.max(axis=1)
+    neutral = (mx - corrected.min(axis=1)) < 0.12 * np.maximum(mx, 0.05)
     curves = {"rgb": master}
+    if neutral.sum() < max(200, 0.03 * len(px)):
+        for c in "rgb":
+            curves[c] = identity_curve()
+        curves["rgb"] = [[round(x, 4), round(y, 4)] for x, y in master]
+        return curves
+    nl = corrected[neutral]
+    nlum = nl @ LUM_WEIGHTS
+    dark = nl[nlum <= np.quantile(nlum, 0.1)].mean(axis=0)
+    bright = nl[nlum >= np.quantile(nlum, 0.9)].mean(axis=0)
     for i, c in enumerate("rgb"):
-        dlo = float(np.clip((lo[i] - lo_m) * 0.6, -0.04, 0.04))
-        dhi = float(np.clip((hi[i] - hi_m) * 0.6, -0.04, 0.04))
+        dlo = float(np.clip((dark[i] - dark.mean()) * 0.5, -0.03, 0.03))
+        dhi = float(np.clip((bright[i] - bright.mean()) * 0.5, -0.03, 0.03))
+        # channel too high in the shadows -> clip it down; too low -> lift it
         start = [dlo, 0.0] if dlo > 0 else [0.0, -dlo]
-        end = [1.0 - dhi, 1.0] if dhi > 0 else [1.0, 1.0 + dhi]
+        # channel too high in the highlights -> pull it down; too low -> boost it
+        end = [1.0, 1.0 - dhi] if dhi > 0 else [1.0 + dhi, 1.0]
         curves[c] = [[round(start[0], 4), round(start[1], 4)], [round(end[0], 4), round(end[1], 4)]]
         if abs(dlo) < 0.003 and abs(dhi) < 0.003:
             curves[c] = identity_curve()

@@ -1,0 +1,24 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<component type="desktop-application">
+  <id>io.github.lordsimon666.SimonImageEnhance</id>
+  <metadata_license>CC0-1.0</metadata_license>
+  <project_license>MIT</project_license>
+  <name>Simon Image Enhance</name>
+  <summary>Lightroom-style photo editor with AI auto correction</summary>
+  <summary xml:lang="de">Fotobearbeitung im Lightroom-Stil mit KI-Korrektur</summary>
+  <description>
+    <p>Non-destructive photo editing for JPEG, PNG and camera RAW files.</p>
+    <ul>
+      <li>White balance (temperature, tint, eyedropper, presets)</li>
+      <li>Tone controls and interactive RGB / red / green / blue tone curves</li>
+      <li>AI correction that sets white balance and tone curves automatically</li>
+      <li>RAW support via LibRaw, export to JPEG and PNG (8/16 bit)</li>
+    </ul>
+  </description>
+  <launchable type="desktop-id">io.github.lordsimon666.SimonImageEnhance.desktop</launchable>
+  <url type="homepage">https://github.com/lordsimon666/Simon-Image-Enhance</url>
+  <content_rating type="oars-1.1"/>
+  <releases>
+    <release version="1.0.0" date="2026-11-05"/>
+  </releases>
+</component>

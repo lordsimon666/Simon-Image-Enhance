@@ -1,0 +1,10 @@
+__pycache__/
+*.pyc
+build/
+dist/
+*.egg-info/
+.pytest_cache/
+.venv/
+venv/
+packaging/flatpak/SimonImageEnhance-linux.tar.gz
+packaging/flatpak/.flatpak-builder/

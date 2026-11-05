@@ -1,0 +1,47 @@
+# Flatpak manifest. Packages the prebuilt PyInstaller bundle
+# (CI places it at packaging/flatpak/SimonImageEnhance-linux.tar.gz).
+#   flatpak-builder --user --install --force-clean build-dir packaging/flatpak/io.github.lordsimon666.SimonImageEnhance.yml
+app-id: io.github.lordsimon666.SimonImageEnhance
+runtime: org.freedesktop.Platform
+runtime-version: '24.08'
+sdk: org.freedesktop.Sdk
+command: simon-image-enhance
+finish-args:
+  - --share=ipc
+  - --socket=wayland
+  - --socket=fallback-x11
+  - --device=dri
+  - --filesystem=home
+  - --filesystem=xdg-pictures
+  - --filesystem=/media
+  - --filesystem=/run/media
+  - --env=QT_QPA_PLATFORM=wayland;xcb
+modules:
+  - name: simon-image-enhance
+    buildsystem: simple
+    build-commands:
+      - mkdir -p /app/lib/simon-image-enhance /app/bin
+      - cp -a bundle/. /app/lib/simon-image-enhance/
+      - ln -s /app/lib/simon-image-enhance/SimonImageEnhance /app/bin/simon-image-enhance
+      - install -Dm644 io.github.lordsimon666.SimonImageEnhance.desktop /app/share/applications/io.github.lordsimon666.SimonImageEnhance.desktop
+      - install -Dm644 io.github.lordsimon666.SimonImageEnhance.metainfo.xml /app/share/metainfo/io.github.lordsimon666.SimonImageEnhance.metainfo.xml
+      - install -Dm644 icon.svg /app/share/icons/hicolor/scalable/apps/io.github.lordsimon666.SimonImageEnhance.svg
+      - for s in 64 128 256 512; do install -Dm644 icon-$s.png /app/share/icons/hicolor/${s}x${s}/apps/io.github.lordsimon666.SimonImageEnhance.png; done
+    sources:
+      - type: archive
+        path: SimonImageEnhance-linux.tar.gz
+        dest: bundle
+      - type: file
+        path: ../linux/io.github.lordsimon666.SimonImageEnhance.desktop
+      - type: file
+        path: ../linux/io.github.lordsimon666.SimonImageEnhance.metainfo.xml
+      - type: file
+        path: ../icons/icon.svg
+      - type: file
+        path: ../icons/icon-64.png
+      - type: file
+        path: ../icons/icon-128.png
+      - type: file
+        path: ../icons/icon-256.png
+      - type: file
+        path: ../icons/icon-512.png

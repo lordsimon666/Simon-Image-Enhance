@@ -1,0 +1,14 @@
+[Desktop Entry]
+Type=Application
+Name=Simon Image Enhance
+GenericName=Photo Editor
+GenericName[de]=Fotobearbeitung
+Comment=Edit photos: white balance, tone curves and AI auto correction
+Comment[de]=Fotos bearbeiten: Weißabgleich, Gradationskurven und KI-Korrektur
+Exec=simon-image-enhance %F
+Icon=io.github.lordsimon666.SimonImageEnhance
+Terminal=false
+Categories=Graphics;Photography;RasterGraphics;Qt;
+Keywords=photo;raw;white balance;curves;lightroom;foto;weißabgleich;
+MimeType=image/jpeg;image/png;image/tiff;image/webp;image/x-adobe-dng;image/x-canon-cr2;image/x-canon-cr3;image/x-canon-crw;image/x-nikon-nef;image/x-nikon-nrw;image/x-sony-arw;image/x-sony-srf;image/x-sony-sr2;image/x-fuji-raf;image/x-olympus-orf;image/x-panasonic-rw2;image/x-pentax-pef;image/x-samsung-srw;image/x-sigma-x3f;image/x-dcraw;
+StartupWMClass=SimonImageEnhance

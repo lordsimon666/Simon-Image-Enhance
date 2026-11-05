@@ -1,0 +1,128 @@
+name: Build
+
+on:
+  push:
+    branches: ["**"]
+    tags: ["v*"]
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+env:
+  PYTHON_VERSION: "3.12"
+
+jobs:
+  test:
+    runs-on: ubuntu-22.04
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: ${{ env.PYTHON_VERSION }}
+      - run: pip install -r requirements.txt pytest
+      - run: python -m pytest -q
+
+  windows:
+    needs: test
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: ${{ env.PYTHON_VERSION }}
+      - name: Install Inno Setup
+        run: choco install innosetup -y --no-progress
+      - name: Build installer + portable
+        shell: pwsh
+        run: .\packaging\windows\build.ps1
+      - name: Smoke test
+        shell: pwsh
+        run: |
+          $p = Start-Process dist\SimonImageEnhance\SimonImageEnhance.exe -PassThru
+          Start-Sleep 10
+          if ($p.HasExited) { throw "App exited early with code $($p.ExitCode)" }
+          Stop-Process $p
+      - uses: actions/upload-artifact@v4
+        with:
+          name: windows
+          path: |
+            dist/*-Setup.exe
+            dist/*-Windows-Portable.zip
+
+  linux:
+    needs: test
+    runs-on: ubuntu-22.04   # oldest supported glibc -> runs on most distros
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: ${{ env.PYTHON_VERSION }}
+      - name: System libraries (bundled into the app)
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y libegl1 libgl1 libxkbcommon-x11-0 libxcb-cursor0 libxcb-icccm4 \
+            libxcb-image0 libxcb-keysyms1 libxcb-randr0 libxcb-render-util0 libxcb-shape0 \
+            libxcb-xinerama0 libxcb-xkb1 libfontconfig1 libdbus-1-3 xvfb
+      - name: Build bundle
+        run: |
+          pip install -r requirements.txt pyinstaller
+          pyinstaller packaging/simon_enhance.spec --noconfirm --clean
+          echo "VERSION=$(python -c 'import simon_enhance; print(simon_enhance.__version__)')" >> $GITHUB_ENV
+      - name: Smoke test
+        run: |
+          timeout 10 xvfb-run -a dist/SimonImageEnhance/SimonImageEnhance || [ $? -eq 124 ]
+      - name: Tarball
+        run: tar -C dist/SimonImageEnhance -czf dist/SimonImageEnhance-linux.tar.gz .
+      - name: .deb
+        run: packaging/linux/build_deb.sh dist/SimonImageEnhance "$VERSION" dist
+      - name: AppImage
+        run: |
+          sudo apt-get install -y libfuse2 || true
+          packaging/linux/build_appimage.sh dist/SimonImageEnhance "$VERSION" dist
+      - uses: actions/upload-artifact@v4
+        with:
+          name: linux
+          path: |
+            dist/*.deb
+            dist/*.AppImage
+      - uses: actions/upload-artifact@v4
+        with:
+          name: linux-bundle
+          path: dist/SimonImageEnhance-linux.tar.gz
+
+  flatpak:
+    needs: linux
+    runs-on: ubuntu-latest
+    container:
+      image: ghcr.io/flathub-infra/flatpak-github-actions:freedesktop-24.08
+      options: --privileged
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/download-artifact@v4
+        with:
+          name: linux-bundle
+          path: packaging/flatpak
+      - uses: flatpak/flatpak-github-actions/flatpak-builder@v6
+        with:
+          bundle: SimonImageEnhance.flatpak
+          manifest-path: packaging/flatpak/io.github.lordsimon666.SimonImageEnhance.yml
+          cache: false
+          upload-artifact: true
+
+  release:
+    if: startsWith(github.ref, 'refs/tags/v')
+    needs: [windows, linux, flatpak]
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          path: artifacts
+      - run: find artifacts -type f
+      - uses: softprops/action-gh-release@v2
+        with:
+          files: |
+            artifacts/windows/*
+            artifacts/linux/*
+            artifacts/**/*.flatpak

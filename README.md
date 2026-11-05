@@ -41,10 +41,10 @@ Tags `v*` automatisch als **Release**:
 
 | Datei | System |
 |---|---|
-| `SimonImageEnhance-<ver>-Setup.exe` | Windows-Installer (ohne Admin-Rechte möglich, optional Dateizuordnung) |
+| `SimonImageEnhance-Setup.exe` | Windows-Installer (ohne Admin-Rechte möglich, optional Dateizuordnung) |
 | `SimonImageEnhance-<ver>-Windows-Portable.zip` | Windows portabel – entpacken & starten, Einstellungen bleiben im Ordner |
-| `simon-image-enhance_<ver>_amd64.deb` | Debian / Ubuntu / Mint |
-| `SimonImageEnhance-<ver>-x86_64.AppImage` | Jede Linux-Distribution (`chmod +x` und starten) |
+| `simon-image-enhance_amd64.deb` | Debian / Ubuntu / Mint |
+| `SimonImageEnhance-x86_64.AppImage` | Jede Linux-Distribution (`chmod +x` und starten) |
 | `SimonImageEnhance.flatpak` | Flatpak (`flatpak install --user SimonImageEnhance.flatpak`) |
 
 Release erstellen:

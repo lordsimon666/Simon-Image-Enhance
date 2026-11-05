@@ -31,6 +31,6 @@ if [ ! -x "$TOOL" ]; then
   chmod +x "$TOOL"
 fi
 mkdir -p "$OUT"
-DST="$OUT/SimonImageEnhance-$VERSION-$ARCH.AppImage"
+DST="$OUT/SimonImageEnhance-$ARCH.AppImage"
 ARCH=$ARCH APPIMAGE_EXTRACT_AND_RUN=1 "$TOOL" --no-appstream "$APPDIR" "$DST"
 echo "$DST"

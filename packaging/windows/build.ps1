@@ -18,4 +18,4 @@ Compress-Archive -Path "$portable\*" -DestinationPath "$portable.zip" -Force
 $iscc = (Get-Command iscc -ErrorAction SilentlyContinue).Source
 if (-not $iscc) { $iscc = "${env:ProgramFiles(x86)}\Inno Setup 6\ISCC.exe" }
 & $iscc "/DMyAppVersion=$version" packaging\windows\installer.iss
-Write-Host "Fertig: dist\SimonImageEnhance-$version-Setup.exe und $portable.zip"
+Write-Host "Fertig: dist\SimonImageEnhance-Setup.exe und $portable.zip"

@@ -48,6 +48,6 @@ chmod 755 "$ROOT/DEBIAN/postinst" "$ROOT/DEBIAN/postrm"
 find "$ROOT/opt" -type d -exec chmod 755 {} +
 
 mkdir -p "$OUT"
-DEB="$OUT/${PKG}_${VERSION}_${ARCH}.deb"
+DEB="$OUT/${PKG}_${ARCH}.deb"
 dpkg-deb --root-owner-group --build "$ROOT" "$DEB"
 echo "$DEB"

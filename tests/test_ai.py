@@ -194,3 +194,39 @@ def test_cidnet_network_output_is_sane():
     # keeps the picture: the red square stays red, the background stays grey
     assert y[0, 0, 200, 200] > y[0, 1, 200, 200] + 0.2
     assert abs(float(y[0, 0, 20, 20]) - float(y[0, 2, 20, 20])) < 0.05
+
+
+def test_openvino_runner_matches_cpu(monkeypatch):
+    pytest.importorskip("openvino")
+    monkeypatch.setenv("SIE_OPENVINO_ALLOW_CPU", "1")
+    devs = [d for d in E.discover(refresh=True) if d.runtime == "openvino"]
+    if not devs:
+        pytest.skip("OpenVINO ohne Gerät")
+    x = np.random.default_rng(1).random((1, 3, 64, 64)).astype(np.float32)
+    E.set_preferred("ort:cpu")
+    ref = E.run("realesr", x)
+    E.set_preferred(devs[0].id)
+    out = E.run("realesr", x)
+    assert E.last_device("realesr").runtime == "openvino"
+    assert np.abs(out - ref).mean() < 0.01
+    monkeypatch.delenv("SIE_OPENVINO_ALLOW_CPU")
+    E.discover(refresh=True)
+
+
+def test_webgpu_runner_matches_cpu(monkeypatch):
+    import onnxruntime as ort
+    if "WebGpuExecutionProvider" not in ort.get_available_providers():
+        pytest.skip("ONNX Runtime ohne WebGPU")
+    monkeypatch.setenv("SIE_ALLOW_CPU_VULKAN", "1")
+    devs = [d for d in E.discover(refresh=True) if d.id.startswith("ort:webgpu")]
+    if not devs:
+        pytest.skip("kein Vulkan-Gerät")
+    x = np.random.default_rng(2).random((1, 3, 64, 64)).astype(np.float32)
+    E.set_preferred("ort:cpu")
+    ref = E.run("realesr", x)
+    E.set_preferred(devs[0].id)
+    out = E.run("realesr", x)
+    assert E.last_device("realesr").id == devs[0].id
+    assert np.abs(out - ref).mean() < 0.01
+    monkeypatch.delenv("SIE_ALLOW_CPU_VULKAN")
+    E.discover(refresh=True)

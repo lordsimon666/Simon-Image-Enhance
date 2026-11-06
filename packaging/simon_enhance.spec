@@ -27,9 +27,9 @@ try:
     cl_datas, cl_binaries, cl_hidden = collect_all("pyopencl")
 except Exception:
     cl_datas, cl_binaries, cl_hidden = [], [], []
-# AI runtimes: ONNX Runtime (OpenVINO on Linux / DirectML on Windows), ncnn (Vulkan),
+# AI runtimes: ONNX Runtime (WebGPU on Linux / DirectML on Windows), OpenVINO (NPU), ncnn (Vulkan),
 # wgpu (Vulkan compute). collect_all picks up their native libraries and resources.
-for _pkg in ("onnxruntime", "ncnn", "wgpu"):
+for _pkg in ("onnxruntime", "openvino", "ncnn", "wgpu"):
     try:
         _d, _b, _h = collect_all(_pkg)
         cl_datas += _d
@@ -56,6 +56,9 @@ a = Analysis(
 # drop CPU OpenCL implementations (PoCL) that hooks may pick up from a test setup
 a.binaries = [x for x in a.binaries if "pocl" not in x[0].lower()]
 a.datas = [x for x in a.datas if "pocl" not in x[0].lower()]
+# OpenVINO model importers the app never uses (it only loads ONNX)
+_unused_ov = ("tensorflow_frontend", "tensorflow_lite_frontend", "pytorch_frontend", "paddle_frontend", "jax_frontend")
+a.binaries = [x for x in a.binaries if not any(u in x[0] for u in _unused_ov)]
 pyz = PYZ(a.pure)
 exe = EXE(
     pyz,

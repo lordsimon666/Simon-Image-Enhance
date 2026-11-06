@@ -2,12 +2,18 @@
 
 Runtimes (all optional, the CPU always works):
   * ONNX Runtime
-      - OpenVINO EP  : Intel NPU (Core Ultra "AI Boost"), Intel GPU, CPU   (Linux build)
+      - WebGPU EP    : any GPU through the installed Vulkan driver (Linux) or Direct3D 12
+                       (Windows) - AMD, NVIDIA and Intel alike               (Linux build)
+      - OpenVINO EP  : Intel NPU / GPU, if an onnxruntime-openvino build is used
       - DirectML EP  : any DirectX 12 GPU incl. NVIDIA Tensor cores, AMD, Intel,
                        Intel NPU                                         (Windows build)
       - CUDA / TensorRT EP : NVIDIA Tensor cores, if an onnxruntime-gpu build is used
+  * OpenVINO (standalone): Intel NPU (Core Ultra "AI Boost") and Intel GPU     (Linux build)
   * ncnn + Vulkan  : any Vulkan GPU (NVIDIA, AMD, Intel). ncnn uses fp16 and, where the
                      driver offers VK_KHR/NV_cooperative_matrix, the Tensor / matrix cores.
+
+All GPU / NPU paths use the drivers already installed on the system (Mesa, AMD, NVIDIA,
+Intel NPU driver); nothing vendor specific (CUDA, ROCm) is bundled.
 
 Every (model, device) combination is tried once; if a device cannot compile or run a
 model (NPUs only support some operators, memory limits, ...) the next one is used.
@@ -67,6 +73,34 @@ def _ncnn():
         return None
 
 
+def _openvino():
+    if os.environ.get("SIE_OPENVINO", "1") == "0":
+        return None
+    try:
+        import openvino as ov  # type: ignore
+        return ov
+    except Exception:
+        return None
+
+
+def _vulkan_gpus() -> list[tuple[str, str]]:
+    """(name, kind) of real Vulkan GPUs, used to label the WebGPU device."""
+    gpus = []
+    nc = _ncnn()
+    if nc is None:
+        return gpus
+    try:
+        for i in range(nc.get_gpu_count()):
+            info = nc.get_gpu_info(i)
+            typ = info.type()  # 0 discrete, 1 integrated, 2 virtual, 3 cpu
+            if typ == 3 and os.environ.get("SIE_ALLOW_CPU_VULKAN") != "1":
+                continue
+            gpus.append((info.device_name().strip(), "dgpu" if typ == 0 else "igpu"))
+    except Exception:
+        pass
+    return gpus
+
+
 def _openvino_devices(ort) -> list[str]:
     try:
         from onnxruntime.capi import _pybind_state as C  # type: ignore
@@ -98,6 +132,26 @@ def discover(refresh: bool = False) -> list[Device]:
                 devs.append(Device("ort:tensorrt:0", "NVIDIA GPU (TensorRT)", "dgpu", "onnxruntime", tensor_cores=True))
             if "CUDAExecutionProvider" in prov:
                 devs.append(Device("ort:cuda:0", "NVIDIA GPU (CUDA)", "dgpu", "onnxruntime", tensor_cores=True))
+            if "WebGpuExecutionProvider" in prov:
+                gpus = _vulkan_gpus()
+                if gpus or os.name == "nt":
+                    name, kind = gpus[0] if gpus else ("GPU", "dgpu")  # Dawn picks the fast GPU
+                    api = "Direct3D 12" if os.name == "nt" else "Vulkan"
+                    devs.append(Device("ort:webgpu:0", f"{name} (WebGPU/{api})", kind, "onnxruntime"))
+        ov = _openvino()
+        if ov is not None:
+            try:
+                ov_devs = ov.Core().available_devices
+            except Exception:
+                ov_devs = []
+            for d in ov_devs:
+                base = d.split(".")[0].upper()
+                if base == "NPU":
+                    devs.append(Device(f"ov:{d}", "Intel NPU (OpenVINO)", "npu", "openvino"))
+                elif base == "GPU":
+                    devs.append(Device(f"ov:{d}", f"Intel GPU {d} (OpenVINO)", "igpu", "openvino"))
+                elif base == "CPU" and os.environ.get("SIE_OPENVINO_ALLOW_CPU") == "1":
+                    devs.append(Device("ov:CPU", "CPU (OpenVINO)", "igpu", "openvino"))  # tests only
         nc = _ncnn()
         if nc is not None:
             try:
@@ -114,7 +168,9 @@ def discover(refresh: bool = False) -> list[Device]:
                 pass
         if ort is not None:
             devs.append(Device("ort:cpu", "CPU", "cpu", "onnxruntime"))
-        devs.sort(key=lambda d: KIND_ORDER[d.kind])
+        rt_order = {"ncnn": 0, "onnxruntime": 1, "openvino": 2}
+        devs.sort(key=lambda d: (KIND_ORDER[d.kind], 0 if d.id.startswith(("ort:cuda", "ort:tensorrt")) else 1,
+                                 rt_order.get(d.runtime, 3)))
         _devices = devs
         return devs
 
@@ -129,7 +185,7 @@ def preferred() -> str:
 
 def candidates(model_id: str) -> list[Device]:
     info = M.MODELS[model_id]
-    devs = [d for d in discover() if d.runtime == "onnxruntime" or (d.runtime == "ncnn" and info.ncnn)]
+    devs = [d for d in discover() if d.runtime in ("onnxruntime", "openvino") or (d.runtime == "ncnn" and info.ncnn)]
     devs = [d for d in devs if (model_id, d.id) not in _failed]
     pref = _preferred["id"]
     if pref != "auto":
@@ -177,6 +233,8 @@ class _OrtRunner:
                          "CPUExecutionProvider"]
         elif parts[1] == "cuda":
             providers = [("CUDAExecutionProvider", {"device_id": 0}), "CPUExecutionProvider"]
+        elif parts[1] == "webgpu":
+            providers = [("WebGpuExecutionProvider", {}), "CPUExecutionProvider"]
         else:
             providers = ["CPUExecutionProvider"]
         self.sess = ort.InferenceSession(M.onnx_path(model_id), sess_options=so, providers=providers)
@@ -218,11 +276,28 @@ class _NcnnRunner:
         return np.stack(outs).astype(np.float32)
 
 
+class _OpenVinoRunner:
+    """Standalone OpenVINO: compiles the ONNX model for the NPU / Intel GPU. NPUs need
+    static shapes - every call uses one fixed tile / input size."""
+
+    def __init__(self, model_id: str, device: Device, shape):
+        ov = _openvino()
+        core = ov.Core()
+        core.set_property({"CACHE_DIR": os.path.join(M.models_dir(), "ov_cache")})
+        model = core.read_model(M.onnx_path(model_id))
+        model.reshape({model.inputs[0].get_any_name(): ov.PartialShape(list(shape))})
+        self.compiled = core.compile_model(model, device.id.split(":", 1)[1])
+        self.out = self.compiled.outputs[0]
+
+    def __call__(self, x: np.ndarray) -> np.ndarray:
+        return np.asarray(self.compiled([x])[self.out], dtype=np.float32)
+
+
 def _runner(model_id: str, device: Device, shape):
     key = (model_id, device.id, shape)
     r = _sessions.get(key)
     if r is None:
-        cls = _NcnnRunner if device.runtime == "ncnn" else _OrtRunner
+        cls = {"ncnn": _NcnnRunner, "openvino": _OpenVinoRunner}.get(device.runtime, _OrtRunner)
         r = cls(model_id, device, shape)
         _sessions[key] = r
     return r

@@ -70,26 +70,29 @@ simon-image-enhance --ai-info
 
 | Weg | Hardware | Plattform |
 |---|---|---|
-| ONNX Runtime + **OpenVINO** | **Intel-NPU** (Core Ultra „AI Boost“), Intel-GPU | Linux |
+| ONNX Runtime + **WebGPU** | jede GPU über den installierten **Vulkan**-Treiber: **AMD**, NVIDIA, Intel | Linux |
+| **OpenVINO** | **Intel-NPU** (Core Ultra „AI Boost“), Intel-GPU | Linux |
 | ONNX Runtime + **DirectML** | jede DirectX-12-GPU: NVIDIA (**Tensor-Kerne**), AMD, Intel; Intel-NPU | Windows |
 | **ncnn + Vulkan** | jede Vulkan-GPU: NVIDIA (**Tensor-Kerne** über *cooperative matrix*), AMD, Intel – auch im Flatpak | Linux, Windows |
 | ONNX Runtime CPU | jeder Prozessor | überall |
 
+Alle Wege nutzen die **bereits installierten Treiber** (Mesa/RADV, AMD, NVIDIA, Intel-NPU-Treiber);
+herstellerspezifische Rechenbibliotheken wie CUDA oder ROCm werden nicht mitgeliefert.
+
 | Funktion | Modell (Lizenz) | Download | läuft auf |
 |---|---|---|---|
-| Hintergrund entfernen | BiRefNet-lite (MIT) | 224 MB, einmalig | NPU*, DirectML-GPU, CPU |
-| Entrauschen | SCUNet real (Apache-2.0/MIT) | 77 MB, einmalig | NPU*, DirectML-GPU, CPU |
-| Hochskalieren | Real-ESRGAN general-x4v3 (BSD-3) | in der App enthalten | Vulkan-GPU, NPU*, DirectML-GPU, CPU |
-| KI-Korrektur „Profi-Look“ | HVI-CIDNet FiveK (MIT) | in der App enthalten | NPU*, DirectML-GPU, CPU |
+| Hintergrund entfernen | BiRefNet-lite (MIT) | 224 MB, einmalig | WebGPU-GPU*, NPU*, DirectML-GPU, CPU |
+| Entrauschen | SCUNet real (Apache-2.0/MIT) | 77 MB, einmalig | WebGPU-GPU, NPU*, DirectML-GPU, CPU |
+| Hochskalieren | Real-ESRGAN general-x4v3 (BSD-3) | in der App enthalten | Vulkan-GPU (ncnn), WebGPU-GPU, NPU*, DirectML-GPU, CPU |
+| KI-Korrektur „Profi-Look“ | HVI-CIDNet FiveK (MIT) | in der App enthalten | WebGPU-GPU, NPU*, DirectML-GPU, CPU |
 
-\* NPUs können nicht jedes Modell übersetzen – dann übernimmt automatisch die nächste Hardware.
+\* Nicht jedes Gerät kann jedes Modell übersetzen – dann übernimmt automatisch die nächste Hardware.
+BiRefNet ließ sich im Test auf einem Software-Vulkan-Treiber nicht über WebGPU ausführen; ob es auf
+echten Grafikkarten läuft, zeigt `--ai-info` bzw. die Statusleiste (sonst rechnet die CPU).
 
-Ehrliche Einschränkungen:
-- Unter **Linux mit NVIDIA- oder AMD-Grafik** nutzt nur das Hochskalieren die Grafikkarte
-  (Vulkan). Hintergrund-KI und Entrauschen laufen dort auf der CPU: ihre Transformer-Netze
-  lassen sich (noch) nicht nach ncnn/Vulkan übertragen, und die CUDA-Variante von ONNX Runtime
-  würde den Download um mehrere Gigabyte vergrößern.
-- AMD-NPUs (Ryzen AI / XDNA) werden nicht unterstützt.
+Weitere Hinweise:
+- **AMD-NPUs** (Ryzen AI / XDNA) werden nicht unterstützt.
+- Für die **Intel-NPU** unter Linux muss der Intel-NPU-Treiber installiert sein.
 - Modelle werden von Hugging Face geladen (feste Version, SHA-256-geprüft), danach offline nutzbar.
 
 ## GPU-Beschleunigung der Filter

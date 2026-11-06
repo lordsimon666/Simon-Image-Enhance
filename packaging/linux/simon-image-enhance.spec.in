@@ -1,0 +1,58 @@
+# RPM spec for Fedora / openSUSE / RHEL. Packages the prebuilt PyInstaller bundle;
+# used by packaging/linux/build_rpm.sh (which fills in @VERSION@ and @BUNDLE@).
+%global debug_package %{nil}
+%global __os_install_post %{nil}
+%global _build_id_links none
+%define _binary_payload w19.zstdio
+%{!?_metainfodir: %global _metainfodir %{_datadir}/metainfo}
+
+Name:           simon-image-enhance
+Version:        @VERSION@
+Release:        1%{?dist}
+Summary:        Lightroom-style photo editor with AI auto correction
+License:        MIT
+URL:            https://github.com/lordsimon666/Simon-Image-Enhance
+ExclusiveArch:  x86_64
+# the bundle ships its own Python, Qt and libraries -> no automatic dependency scan
+AutoReqProv:    no
+Requires:       libEGL.so.1()(64bit)
+Requires:       libGL.so.1()(64bit)
+Requires:       libfontconfig.so.1()(64bit)
+Requires:       libfreetype.so.6()(64bit)
+Requires:       libdbus-1.so.3()(64bit)
+Requires:       libxkbcommon.so.0()(64bit)
+Requires:       libxkbcommon-x11.so.0()(64bit)
+Requires:       libxcb-cursor.so.0()(64bit)
+Requires:       libxcb-icccm.so.4()(64bit)
+Requires:       libxcb-image.so.0()(64bit)
+Requires:       libxcb-keysyms.so.1()(64bit)
+Requires:       libxcb-render-util.so.0()(64bit)
+Requires:       hicolor-icon-theme
+# GPU acceleration: OpenCL driver for AMD / Intel GPUs (Mesa Rusticl). NVIDIA users
+# get OpenCL with the NVIDIA driver (e.g. xorg-x11-drv-nvidia-cuda-libs from RPM Fusion).
+Recommends:     mesa-libOpenCL
+Suggests:       intel-compute-runtime
+
+%description
+Non-destructive editing of JPEG, PNG and camera RAW files: white balance,
+tone controls, RGB tone curves, an AI correction that automatically sets
+white balance and tone curves, and AI green/blue screen removal with
+transparent PNG export. Uses the GPU via OpenCL when available.
+
+%install
+mkdir -p %{buildroot}/opt/%{name} %{buildroot}%{_bindir}
+cp -a @BUNDLE@/. %{buildroot}/opt/%{name}/
+ln -s ../../opt/%{name}/SimonImageEnhance %{buildroot}%{_bindir}/%{name}
+install -Dm644 @HERE@/io.github.lordsimon666.SimonImageEnhance.desktop %{buildroot}%{_datadir}/applications/io.github.lordsimon666.SimonImageEnhance.desktop
+install -Dm644 @HERE@/io.github.lordsimon666.SimonImageEnhance.metainfo.xml %{buildroot}%{_metainfodir}/io.github.lordsimon666.SimonImageEnhance.metainfo.xml
+for s in 16 32 48 64 128 256 512; do
+  install -Dm644 @HERE@/../icons/icon-$s.png %{buildroot}%{_datadir}/icons/hicolor/${s}x${s}/apps/io.github.lordsimon666.SimonImageEnhance.png
+done
+install -Dm644 @HERE@/../icons/icon.svg %{buildroot}%{_datadir}/icons/hicolor/scalable/apps/io.github.lordsimon666.SimonImageEnhance.svg
+
+%files
+/opt/%{name}
+%{_bindir}/%{name}
+%{_datadir}/applications/io.github.lordsimon666.SimonImageEnhance.desktop
+%{_metainfodir}/io.github.lordsimon666.SimonImageEnhance.metainfo.xml
+%{_datadir}/icons/hicolor/*/apps/io.github.lordsimon666.SimonImageEnhance.*

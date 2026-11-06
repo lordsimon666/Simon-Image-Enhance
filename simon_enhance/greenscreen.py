@@ -99,7 +99,11 @@ def _box_axis(x: np.ndarray, r: int, axis: int) -> np.ndarray:
 
 def _box(x: np.ndarray, r: int) -> np.ndarray:
     """Mean over a (2r+1)^2 window, edges handled by normalising with the count.
-    Separable: rows, then columns."""
+    Separable: rows, then columns. Runs on the GPU (OpenCL) when available."""
+    from . import gpu
+    res = gpu.box(x, r)
+    if res is not None:
+        return res
     return _box_axis(_box_axis(x, r, 0), r, 1).astype(np.float32)
 
 

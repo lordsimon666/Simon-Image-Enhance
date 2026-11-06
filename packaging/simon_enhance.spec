@@ -19,15 +19,29 @@ EXCLUDES = [
     "matplotlib", "scipy", "pandas", "IPython", "pytest", "lxml", "PIL.ImageTk",
 ]
 
+# GPU acceleration (OpenCL) is optional at runtime but bundled: collect pyopencl's
+# kernels sources and its bundled OpenCL ICD loader.
+from PyInstaller.utils.hooks import collect_all
+try:
+    cl_datas, cl_binaries, cl_hidden = collect_all("pyopencl")
+except Exception:
+    cl_datas, cl_binaries, cl_hidden = [], [], []
+# never ship a CPU OpenCL implementation that may be installed for tests
+cl_binaries = [b for b in cl_binaries if "pocl" not in os.path.basename(b[0]).lower()]
+cl_datas = [d for d in cl_datas if "pocl" not in os.path.basename(d[0]).lower()]
+
 a = Analysis(
     [os.path.join(ROOT, "packaging", "launcher.py")],
     pathex=[ROOT],
-    binaries=[],
-    datas=[(os.path.join(ROOT, "simon_enhance", "assets"), "simon_enhance/assets")],
-    hiddenimports=["rawpy", "rawpy._rawpy", "imageio.v3", "imageio.plugins.pillow"],
+    binaries=cl_binaries,
+    datas=[(os.path.join(ROOT, "simon_enhance", "assets"), "simon_enhance/assets")] + cl_datas,
+    hiddenimports=["rawpy", "rawpy._rawpy", "imageio.v3", "imageio.plugins.pillow"] + cl_hidden,
     excludes=EXCLUDES,
     noarchive=False,
 )
+# drop CPU OpenCL implementations (PoCL) that hooks may pick up from a test setup
+a.binaries = [x for x in a.binaries if "pocl" not in x[0].lower()]
+a.datas = [x for x in a.datas if "pocl" not in x[0].lower()]
 pyz = PYZ(a.pure)
 exe = EXE(
     pyz,

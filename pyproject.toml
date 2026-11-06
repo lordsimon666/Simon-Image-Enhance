@@ -15,6 +15,7 @@ dependencies = [
     "Pillow>=10.0",
     "rawpy>=0.19",
     "imageio>=2.31",
+    "pyopencl>=2024.1",
 ]
 
 [project.optional-dependencies]

@@ -49,6 +49,31 @@ Läuft komplett offline auf deinem Rechner, ohne Cloud.
 
 Die KI-Farbkorrektur analysiert bei entferntem Hintergrund nur noch das Motiv.
 
+## GPU-Beschleunigung
+
+Die rechenintensiven Filter der Hintergrundentfernung laufen über **OpenCL** auf der
+Grafikkarte. Ohne passende Grafikkarte oder Treiber rechnet die App automatisch auf dem
+Prozessor – mit identischem Ergebnis. Ein-/Ausschalten: *Einstellungen → GPU-Beschleunigung*.
+
+Prüfen, ob die Grafikkarte erkannt wird:
+
+```bash
+simon-image-enhance --gpu-info
+```
+
+| System | Benötigter OpenCL-Treiber |
+|---|---|
+| Fedora, AMD / Intel | `mesa-libOpenCL` (wird mit dem RPM automatisch mitinstalliert); für Intel alternativ `intel-compute-runtime` |
+| Fedora, NVIDIA | NVIDIA-Treiber mit OpenCL, z. B. `xorg-x11-drv-nvidia-cuda-libs` (RPM Fusion) |
+| Ubuntu / Debian | `mesa-opencl-icd` (AMD/Intel), `intel-opencl-icd` oder den NVIDIA-Treiber |
+| Windows | im normalen Grafikkartentreiber enthalten |
+
+Für Mesa (Rusticl) aktiviert die App die Treiber `radeonsi` und `iris` automatisch
+(`RUSTICL_ENABLE`), sofern nichts anderes eingestellt ist. Liefert ein Treiber beim
+Selbsttest falsche Ergebnisse, wird automatisch die CPU verwendet. Mit `SIE_GPU=0` lässt
+sich die GPU komplett abschalten. Die Flatpak-Version hat im Sandbox-Modus in der Regel
+keinen Zugriff auf OpenCL-Treiber und rechnet daher auf der CPU.
+
 ## Downloads
 
 Fertige Pakete erzeugt GitHub Actions bei jedem Push (Tab **Actions** → Artefakte) und bei
@@ -59,6 +84,7 @@ Tags `v*` automatisch als **Release**:
 | `SimonImageEnhance-Setup.exe` | Windows-Installer (ohne Admin-Rechte möglich, optional Dateizuordnung) |
 | `SimonImageEnhance-<ver>-Windows-Portable.zip` | Windows portabel – entpacken & starten, Einstellungen bleiben im Ordner |
 | `simon-image-enhance_amd64.deb` | Debian / Ubuntu / Mint |
+| `simon-image-enhance.x86_64.rpm` | Fedora / openSUSE / RHEL (`sudo dnf install ./simon-image-enhance.x86_64.rpm`) |
 | `SimonImageEnhance-x86_64.AppImage` | Jede Linux-Distribution (`chmod +x` und starten) |
 | `SimonImageEnhance.flatpak` | Flatpak (`flatpak install --user SimonImageEnhance.flatpak`) |
 
@@ -131,6 +157,10 @@ packaging/linux/build_appimage.sh dist/SimonImageEnhance 1.0.0 dist
 ```
 
 ```bash
+packaging/linux/build_rpm.sh dist/SimonImageEnhance 1.0.0 dist
+```
+
+```bash
 tar -C dist/SimonImageEnhance -czf packaging/flatpak/SimonImageEnhance-linux.tar.gz . && flatpak-builder --user --install --force-clean build-flatpak packaging/flatpak/io.github.lordsimon666.SimonImageEnhance.yml
 ```
 
@@ -149,6 +179,7 @@ simon_enhance/
   processing.py   Bildpipeline (Weißabgleich, Tonwerte, Kurven, LUTs)
   auto.py         KI-Korrektur (Weißabgleich + Kurven)
   greenscreen.py  KI-Hintergrundentfernung (Green-/Bluescreen → Transparenz)
+  gpu.py          GPU-Beschleunigung (OpenCL) mit CPU-Rückfall
   fileio.py       Laden (JPEG/PNG/RAW) und Export (JPEG/PNG)
   store.py        Speicherung der Bearbeitungen, Portabel-Modus
   widgets.py      Kurveneditor, Histogramm, Slider, Bildansicht

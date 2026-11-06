@@ -16,7 +16,7 @@ from PySide6.QtWidgets import (
     QSpinBox, QSplitter, QStatusBar, QToolButton, QVBoxLayout, QWidget,
 )
 
-from . import __version__
+from . import __version__, gpu
 from .auto import ai_correct
 from .greenscreen import CHANNEL_NAMES, ai_remove_background, checkerboard, composite, has_key
 from .fileio import (
@@ -211,6 +211,7 @@ class MainWindow(QMainWindow):
         self._build_ui()
         self._build_actions()
         self._sync_key_ui()
+        QTimer.singleShot(300, self._report_gpu)
         self._set_enabled(False)
         self.statusBar().showMessage(
             "Bild oder Ordner öffnen (Strg+O / Strg+Shift+O) – oder Dateien hier hineinziehen."
@@ -454,6 +455,14 @@ class MainWindow(QMainWindow):
         act(v, "100 % (Vorschau)", self.view.zoom_100, "Ctrl+1")
         act(v, "Nächstes Bild", lambda: self._step(1), "Right")
         act(v, "Vorheriges Bild", lambda: self._step(-1), "Left")
+
+        opt = mb.addMenu("&Einstellungen")
+        self.a_gpu = QAction("GPU-Beschleunigung (OpenCL)", self, checkable=True)
+        self.a_gpu.setStatusTip("Rechenintensive Filter (Hintergrund entfernen) auf der Grafikkarte ausführen")
+        self.a_gpu.setChecked(bool(self.settings.get("gpu", True)))
+        self.a_gpu.toggled.connect(self._on_gpu_toggled)
+        opt.addAction(self.a_gpu)
+        gpu.set_enabled(self.a_gpu.isChecked())
 
         h = mb.addMenu("&Hilfe")
         act(h, "Über…", self.about)
@@ -1003,7 +1012,19 @@ class MainWindow(QMainWindow):
             "<p>Nicht-destruktive Fotobearbeitung: Weißabgleich, Tonwerte, Gradationskurven "
             "und KI-Korrektur.</p>"
             f"<p>RAW-Unterstützung: {'ja (LibRaw)' if raw_available() else 'nein'}<br>"
-            f"Modus: {'Portabel' if is_portable() else 'Installiert'}</p>")
+            f"Modus: {'Portabel' if is_portable() else 'Installiert'}<br>"
+            f"{gpu.status()}</p>")
+
+    def _on_gpu_toggled(self, on):
+        gpu.set_enabled(on)
+        self.settings.set("gpu", bool(on))
+        self.statusBar().showMessage(gpu.status(), 5000)
+
+    def _report_gpu(self):
+        # runs once shortly after start: OpenCL driver discovery can take a moment
+        self.a_gpu.setToolTip(gpu.status())
+        if self.a_gpu.isChecked() and gpu.available():
+            self.statusBar().showMessage(gpu.status(), 5000)
 
     def closeEvent(self, e):
         self.commit_timer.stop()
@@ -1059,6 +1080,12 @@ def apply_dark_theme(app: QApplication):
 
 def main(argv=None):
     argv = list(sys.argv if argv is None else argv)
+    if "--gpu-info" in argv:  # quick diagnostics: is the GPU usable?
+        print(gpu.status())
+        return 0 if gpu.available() else 1
+    if "--version" in argv:
+        print(f"{APP_TITLE} {__version__}")
+        return 0
     QApplication.setApplicationName(APP_TITLE)
     QApplication.setOrganizationName("Simon")
     QApplication.setDesktopFileName("io.github.lordsimon666.SimonImageEnhance")

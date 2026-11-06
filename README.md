@@ -68,6 +68,11 @@ Auswahl: *Einstellungen → KI-Beschleuniger*. Prüfen, was auf deinem Rechner f
 simon-image-enhance --ai-info
 ```
 
+Funktionieren Downloads (Modelle, CUDA/ROCm) nicht, prüft `simon-image-enhance --net-check` die
+HTTPS-Verbindungen. Die App nutzt die Zertifikate des Systems (Fedora/Bazzite: `/etc/pki/tls/certs`,
+Debian/Ubuntu/Arch: `/etc/ssl/certs`) und als Reserve die mitgelieferten von `certifi`;
+eigene Zertifikate (Firmen-Proxy) über `SSL_CERT_FILE`.
+
 | Weg | Hardware | Plattform |
 |---|---|---|
 | ONNX Runtime + **WebGPU** | jede GPU über den installierten **Vulkan**-Treiber: **AMD**, NVIDIA, Intel | Linux |

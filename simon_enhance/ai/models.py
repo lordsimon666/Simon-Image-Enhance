@@ -5,9 +5,10 @@ from __future__ import annotations
 
 import hashlib
 import os
-import urllib.request
+
 from dataclasses import dataclass, field
 
+from .. import net
 from ..store import data_dir
 
 ASSETS = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "assets", "models")
@@ -122,7 +123,7 @@ class DownloadCancelled(Exception):
     pass
 
 
-def download(model_id: str, progress=None, opener=urllib.request.urlopen) -> None:
+def download(model_id: str, progress=None, opener=net.urlopen) -> None:
     """Download missing files of a model. ``progress(done_bytes, total_bytes)`` may
     return False to cancel. Files are verified before they are used."""
     m = MODELS[model_id]

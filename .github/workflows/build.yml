@@ -137,6 +137,8 @@ jobs:
           rpm -q mesa-libOpenCL && echo "OpenCL driver installed"
           simon-image-enhance --gpu-info || true   # CI runners have no GPU
           simon-image-enhance --ai-info
+          # the bundle is built on Ubuntu: downloads must still find Fedora's certificates
+          simon-image-enhance --net-check
       - name: Smoke test (GUI starts)
         run: |
           Xvfb :99 & sleep 2

@@ -31,10 +31,10 @@ import platform
 import re
 import shutil
 import sys
-import urllib.request
 import zipfile
 from dataclasses import dataclass, field
 
+from . import net
 from .store import data_dir
 
 PYPI = "https://pypi.org/pypi"
@@ -355,12 +355,12 @@ def _matches(version: str, spec: str) -> bool:
     return v >= w and v[:len(w) - 1] == w[:len(w) - 1]   # ~=
 
 
-def _fetch_json(url: str, opener=urllib.request.urlopen):
+def _fetch_json(url: str, opener=net.urlopen):
     with opener(url, timeout=60) as r:
         return json.load(r)
 
 
-def _pick_release(name: str, spec: str, opener=urllib.request.urlopen) -> dict:
+def _pick_release(name: str, spec: str, opener=net.urlopen) -> dict:
     meta = _fetch_json(f"{PYPI}/{name}/json", opener)
     versions = sorted((v for v in meta["releases"] if re.fullmatch(r"[\d.]+(post\d+)?", v) and _matches(v, spec)),
                       key=_version_key, reverse=True)
@@ -377,7 +377,7 @@ def _pick_release(name: str, spec: str, opener=urllib.request.urlopen) -> dict:
                        f"{sys.version_info[0]}.{sys.version_info[1]} gefunden")
 
 
-def plan(offer: Offer, opener=urllib.request.urlopen) -> list[dict]:
+def plan(offer: Offer, opener=net.urlopen) -> list[dict]:
     """Wheels to download for an offer (ONNX Runtime build + NVIDIA libs if needed)."""
     p = offer.profile
     if p.pinned:
@@ -408,7 +408,7 @@ class Cancelled(Exception):
     pass
 
 
-def install(offer: Offer, progress=None, opener=urllib.request.urlopen, items=None) -> None:
+def install(offer: Offer, progress=None, opener=net.urlopen, items=None) -> None:
     """Download (SHA-256 verified) and unpack into the runtime folder, then activate."""
     p = offer.profile
     items = items or plan(offer, opener)
@@ -545,5 +545,5 @@ def status() -> str:
     return "Keine zusätzliche GPU-Laufzeit aktiv"
 
 
-def download_size(offer: Offer, opener=urllib.request.urlopen) -> int:
+def download_size(offer: Offer, opener=net.urlopen) -> int:
     return sum(i["size"] for i in plan(offer, opener))

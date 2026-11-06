@@ -22,7 +22,7 @@ EXCLUDES = [
 
 # GPU acceleration (OpenCL) is optional at runtime but bundled: collect pyopencl's
 # kernels sources and its bundled OpenCL ICD loader.
-from PyInstaller.utils.hooks import collect_all
+from PyInstaller.utils.hooks import collect_all, collect_data_files
 try:
     cl_datas, cl_binaries, cl_hidden = collect_all("pyopencl")
 except Exception:
@@ -46,10 +46,12 @@ a = Analysis(
     [os.path.join(ROOT, "packaging", "launcher.py")],
     pathex=[ROOT],
     binaries=cl_binaries,
-    datas=[(os.path.join(ROOT, "simon_enhance", "assets"), "simon_enhance/assets")] + cl_datas,
+    datas=[(os.path.join(ROOT, "simon_enhance", "assets"), "simon_enhance/assets")] + cl_datas
+          + collect_data_files("certifi"),
     hiddenimports=["rawpy", "rawpy._rawpy", "imageio.v3", "imageio.plugins.pillow", "tifffile",
                    "simon_enhance.ai.engine", "simon_enhance.ai.models", "simon_enhance.ai.features",
-                   "simon_enhance.vulkan_compute", "simon_enhance.runtimes"] + cl_hidden,
+                   "simon_enhance.vulkan_compute", "simon_enhance.runtimes", "simon_enhance.net",
+                   "certifi"] + cl_hidden,
     excludes=EXCLUDES,
     noarchive=False,
 )

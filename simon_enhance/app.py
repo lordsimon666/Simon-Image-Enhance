@@ -58,7 +58,8 @@ class Task(QRunnable):
             res = self.fn(*self.args)
         except Exception as exc:  # noqa: BLE001
             traceback.print_exc()
-            res, err = None, str(exc)
+            from . import net
+            res, err = None, net.describe_error(exc)
         else:
             err = None
         try:
@@ -1624,6 +1625,22 @@ def main(argv=None):
         print("Modelle:", ", ".join(f"{m.title}: {'installiert' if ai_models.is_available(k) else 'wird bei Bedarf geladen'}"
                                      for k, m in ai_models.MODELS.items()))
         return 0
+    if "--net-check" in argv:  # diagnostics: do HTTPS downloads work (certificates)?
+        from . import net
+        from .ai import models as ai_models
+        print("Zertifikate:", net.source())
+        urls = ["https://pypi.org/simple/onnxruntime/", f"{runtimes.AMD_REPO}/core/whl-next/rocm-sdk-core/",
+                next(f.url for m in ai_models.MODELS.values() for f in m.files if f.url)]
+        failed = 0
+        for u in urls:
+            try:
+                with net.urlopen(u, timeout=30) as r:
+                    r.read(1)
+                print("OK    ", u)
+            except Exception as exc:  # noqa: BLE001
+                failed += 1
+                print("FEHLER", u, "–", net.describe_error(exc).splitlines()[0])
+        return 1 if failed else 0
     if "--version" in argv:
         print(f"{APP_TITLE} {__version__}")
         return 0

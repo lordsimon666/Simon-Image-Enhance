@@ -134,7 +134,8 @@ class KeyMatte:
         self.bg_radius = self.radius * 6
         self.speck_radius = self.radius * 2 + 1
         self.cluster_radius = self.radius * 8
-        self.pad = self.radius * 2 + 1 + self.bg_radius + self.speck_radius + self.cluster_radius
+        self.pad = (self.radius * 2 + 1 + self.bg_radius + self.speck_radius
+                    + self.cluster_radius + 3)
 
     def matte(self, srgb: np.ndarray) -> np.ndarray:
         s = _key_excess(srgb, self.k, self.floor)
@@ -167,31 +168,41 @@ class KeyMatte:
         srgb = linear_to_srgb(linear)
         alpha = self.matte(srgb)
         out = linear.astype(np.float32, copy=True)
-        # un-mix edge pixels: C = a*F + (1-a)*K  ->  F = (C - (1-a)*K) / a
-        # K is the *local* backdrop colour (screens are never evenly lit: folds,
-        # shadows, hot spots) - a global value leaves bright or magenta fringes.
-        edge = (alpha > 0.0) & (alpha < 1.0)
-        if edge.any():
-            bgw = (alpha == 0.0).astype(np.float32)
-            wsum = _box(bgw, self.bg_radius)
-            local = np.empty_like(out)
-            for c in range(3):
-                local[..., c] = _box(out[..., c] * bgw, self.bg_radius) / np.maximum(wsum, 1e-6)
-            have = wsum > 0.02
-            local[~have] = self.key_lin
-            a = alpha[edge][:, None]
-            f = (out[edge] - (1.0 - a) * local[edge]) / np.maximum(a, 0.15)
-            f = np.clip(f, 0.0, 1.0)
-            # never overshoot into the complementary colour (magenta for green)
-            others = [c for c in range(3) if c != self.k]
-            floor = np.minimum(f[:, others[0]], f[:, others[1]])
-            f[:, self.k] = np.maximum(f[:, self.k], floor)
-            out[edge] = f
+        others = [c for c in range(3) if c != self.k]
+        # 1) despill: remove green/blue reflections from the subject
         if self.despill > 0:
-            others = [c for c in range(3) if c != self.k]
             limit = np.maximum(out[..., others[0]], out[..., others[1]])
             excess = np.maximum(out[..., self.k] - limit, 0.0)
             out[..., self.k] -= self.despill * excess
+        # 2) colour decontamination of the edge. Semi-transparent pixels are a mix of
+        #    subject and backdrop; mathematically "un-mixing" them amplifies every small
+        #    error (dark / red fringes on thin edges). Instead they take the colour of
+        #    the clean subject right behind the edge - the alpha alone makes the soft
+        #    transition. Opaque pixels touching the edge are blended half-way, because
+        #    they usually still carry some backdrop colour.
+        transp = (alpha < 1.0).astype(np.float32)
+        touching = _box(transp, 2) > 0
+        if touching.any():
+            clean_w = ((alpha >= 1.0) & ~touching).astype(np.float32)
+            wsum = _box(clean_w, self.bg_radius)
+            have = wsum > 1e-3
+            semi = (alpha > 0.0) & (alpha < 1.0) & have
+            ring = (alpha >= 1.0) & touching & have
+            sel = semi | ring
+            if sel.any():
+                inner = np.empty((int(sel.sum()), 3), np.float32)
+                for c in range(3):
+                    inner[:, c] = (_box(out[..., c] * clean_w, self.bg_radius)[sel]
+                                   / wsum[sel])
+                own = out[sel]
+                # how much of the pixel's own colour is kept (detail of hair strands)
+                keep = np.where(ring[sel], 0.5, 0.25 * alpha[sel] ** 2)[:, None]
+                out[sel] = inner * (1.0 - keep) + own * keep
+        # 3) final safety: no key-colour excess may remain anywhere near the edge
+        near = touching | (alpha < 1.0)
+        limit = np.maximum(out[..., others[0]], out[..., others[1]])
+        out[..., self.k] = np.where(near, np.minimum(out[..., self.k], limit), out[..., self.k])
+        np.clip(out, 0.0, 1.0, out=out)
         return out, alpha
 
 

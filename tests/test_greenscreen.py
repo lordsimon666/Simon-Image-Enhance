@@ -122,3 +122,24 @@ def test_ai_correction_ignores_removed_backdrop():
     # the green screen must not trick the AI into a strong magenta correction
     assert abs(p.tint) < 15
     assert p.key_enabled == 1.0
+
+
+def test_edges_have_no_dark_or_red_fringe():
+    """Semi-transparent edge pixels must carry the subject's colour - not a darkened,
+    reddish or greenish mix (regression: un-mixing produced a red outline and a dark
+    green-tinted halo around hair)."""
+    img, subject = studio()
+    lin = srgb_to_linear(img)
+    p, _ = ai_remove_background(lin, Params())
+    rgb, alpha = Renderer(p).apply_rgba(lin)
+    h, w = alpha.shape
+    yy, xx = np.mgrid[0:h, 0:w] / np.array([h, w])[:, None, None]
+    head = ((yy - 0.22) / 0.12) ** 2 + ((xx - 0.5) / 0.1) ** 2
+    edge = (alpha > 0.05) & (alpha < 1.0) & (head < 1.6) & (yy < 0.3)
+    assert edge.sum() > 20
+    skin = np.array([0.80, 0.56, 0.50])
+    c = rgb[edge]
+    # brightness close to the skin, no channel shifted towards red or green
+    assert abs(float((c @ [0.2126, 0.7152, 0.0722]).mean()) - float(skin @ [0.2126, 0.7152, 0.0722])) < 0.06
+    assert np.abs(c.mean(axis=0) - skin).max() < 0.06
+    assert (c[:, 1] - np.maximum(c[:, 0], c[:, 2])).max() <= 1e-6

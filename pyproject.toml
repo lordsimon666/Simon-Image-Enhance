@@ -16,6 +16,12 @@ dependencies = [
     "rawpy>=0.19",
     "imageio>=2.31",
     "pyopencl>=2024.1",
+    "tifffile>=2023.1",
+    "wgpu>=0.19",
+    "ncnn>=1.0.20240410",
+    "onnxruntime-openvino>=1.20; sys_platform == 'linux' and platform_machine == 'x86_64'",
+    "onnxruntime-directml>=1.20; sys_platform == 'win32'",
+    "onnxruntime>=1.18; sys_platform == 'darwin' or (sys_platform == 'linux' and platform_machine != 'x86_64')",
 ]
 
 [project.optional-dependencies]
@@ -25,10 +31,10 @@ dev = ["pytest", "pyinstaller>=6.0"]
 simon-image-enhance = "simon_enhance.app:main"
 
 [tool.setuptools]
-packages = ["simon_enhance"]
+packages = ["simon_enhance", "simon_enhance.ai"]
 
 [tool.setuptools.dynamic]
 version = { attr = "simon_enhance.__version__" }
 
 [tool.setuptools.package-data]
-simon_enhance = ["assets/*"]
+simon_enhance = ["assets/*", "assets/models/*"]

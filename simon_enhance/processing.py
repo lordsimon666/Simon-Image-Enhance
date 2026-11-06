@@ -55,6 +55,8 @@ class Params:
     key_softness: float = 50.0   # 0..100
     key_despill: float = 80.0    # 0..100
     key_edge: float = 25.0       # -100 (grow) .. 100 (shrink the matte)
+    key_mode: float = 0.0        # 0 = green/blue screen, 1 = AI mask (no screen needed)
+    key_mask: str = ""           # cache key of the AI mask (see ai/features.py)
     curves: dict = field(default_factory=lambda: {c: identity_curve() for c in CHANNELS})
 
     def copy(self) -> "Params":
@@ -72,7 +74,7 @@ class Params:
                     if c in v and len(v[c]) >= 2:
                         p.curves[c] = [[float(a), float(b)] for a, b in v[c]]
             elif hasattr(p, k) and k != "curves":
-                setattr(p, k, float(v))
+                setattr(p, k, str(v) if isinstance(getattr(p, k), str) else float(v))
         return p
 
     def is_default(self) -> bool:
@@ -344,7 +346,7 @@ class Renderer:
             if keyer is None:
                 yield y, self.apply(strip[a:b]), src_a
                 continue
-            clean, m = keyer.apply(strip)
+            clean, m = keyer.apply(strip, y0=y0, full=(h, linear.shape[1]))
             m = m[a:b]
             if src_a is not None:
                 m = m * src_a

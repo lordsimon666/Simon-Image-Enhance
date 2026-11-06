@@ -282,6 +282,12 @@ class MainWindow(QMainWindow):
         self.key_btn.setToolTip("Erkennt Green- oder Bluescreen automatisch und macht ihn "
                                 "transparent (Strg+G). PNG-Export speichert die Transparenz.")
         self.key_btn.clicked.connect(self.apply_key)
+        self.ai_bg_btn = QPushButton("✨  Hintergrund entfernen (jedes Foto)")
+        self.ai_bg_btn.setObjectName("accent")
+        self.ai_bg_btn.setMinimumHeight(34)
+        self.ai_bg_btn.setToolTip("Neuronales Netz (BiRefNet) erkennt Personen und Objekte und stellt "
+                                  "sie frei – ohne Greenscreen (Strg+Shift+G).")
+        self.ai_bg_btn.clicked.connect(self.apply_ai_background)
         self.key_enable = QCheckBox("Hintergrund entfernt")
         self.key_enable.toggled.connect(self._on_key_toggled)
         self.key_info = QLabel("")
@@ -296,12 +302,41 @@ class MainWindow(QMainWindow):
         self.s_key_spill = SliderRow("Entfärben", 0, 100, 80)
         self.s_key_spill.setToolTip("Entfernt grüne/blaue Reflexe (Spill) auf Haut, Haaren und Kleidung")
         bl.addWidget(self.key_btn)
+        bl.addWidget(self.ai_bg_btn)
         bl.addWidget(self.key_enable)
         for w_ in (self.s_key_tol, self.s_key_soft, self.s_key_edge, self.s_key_spill):
             bl.addWidget(w_)
         bl.addWidget(self.key_info)
         self.key_controls = (self.s_key_tol, self.s_key_soft, self.s_key_edge, self.s_key_spill)
         pl.addWidget(bgr)
+
+        # AI enhance (new file)
+        enh = QGroupBox("KI-Verbessern (neue Datei)")
+        el = QVBoxLayout(enh)
+        self.enh_denoise = QCheckBox("Entrauschen")
+        self.enh_denoise.setChecked(True)
+        self.s_enh_strength = SliderRow("Stärke", 0, 100, 80)
+        up_row = QHBoxLayout()
+        up_row.addWidget(QLabel("Hochskalieren"))
+        self.enh_scale = QComboBox()
+        self.enh_scale.addItem("Aus", 1)
+        self.enh_scale.addItem("2× (doppelte Kantenlänge)", 2)
+        self.enh_scale.addItem("4× (vierfache Kantenlänge)", 4)
+        up_row.addWidget(self.enh_scale, 1)
+        self.enh_btn = QPushButton("Verbessertes Bild erstellen …")
+        self.enh_btn.setToolTip("Erzeugt aus dem Original eine neue 16-Bit-TIFF-Datei (entrauscht "
+                                "und/oder hochskaliert) und öffnet sie mit denselben Einstellungen.")
+        self.enh_btn.clicked.connect(self.ai_enhance)
+        self.enh_denoise.toggled.connect(self.s_enh_strength.setEnabled)
+        el.addWidget(self.enh_denoise)
+        el.addWidget(self.s_enh_strength)
+        el.addLayout(up_row)
+        el.addWidget(self.enh_btn)
+        note2 = QLabel("Rechnet auf NPU / Grafikkarte, falls vorhanden (Einstellungen → KI-Beschleuniger).")
+        note2.setStyleSheet("color:#888;font-size:11px")
+        note2.setWordWrap(True)
+        el.addWidget(note2)
+        pl.addWidget(enh)
 
         # White balance
         wb = QGroupBox("Weißabgleich")
@@ -446,6 +481,8 @@ class MainWindow(QMainWindow):
         act(e, "KI-Korrektur", self.apply_ai, "Ctrl+U")
         act(e, "KI-Korrektur auf Auswahl anwenden", self.apply_ai_selected, "Ctrl+Shift+U")
         act(e, "Greenscreen entfernen (KI)", self.apply_key, "Ctrl+G")
+        act(e, "Hintergrund entfernen – jedes Foto (KI)", self.apply_ai_background, "Ctrl+Shift+G")
+        act(e, "KI-Verbessern (Entrauschen / Hochskalieren) …", self.ai_enhance, "Ctrl+Alt+E")
         act(e, "Weißabgleich-Pipette", lambda: self.picker_btn.toggle(), "W")
         act(e, "Alles zurücksetzen", self.reset_all, "Ctrl+Shift+R")
 
@@ -463,6 +500,10 @@ class MainWindow(QMainWindow):
         self.a_gpu.toggled.connect(self._on_gpu_toggled)
         opt.addAction(self.a_gpu)
         gpu.set_enabled(self.a_gpu.isChecked())
+        self.accel_menu = opt.addMenu("KI-Beschleuniger (NPU / GPU / CPU)")
+        self.accel_menu.aboutToShow.connect(self._fill_accel_menu)
+        from .ai import engine as ai_engine
+        ai_engine.set_preferred(self.settings.get("ai_device", "auto"))
 
         h = mb.addMenu("&Hilfe")
         act(h, "Über…", self.about)
@@ -681,7 +722,12 @@ class MainWindow(QMainWindow):
         kind = "RAW" if data.is_raw else os.path.splitext(data.path)[1][1:].upper()
         self.info.setText(f"{os.path.basename(data.path)}  ·  {w}×{h}  ·  {kind}")
         self.setWindowTitle(f"{os.path.basename(data.path)} – {APP_TITLE}")
-        self.statusBar().showMessage("Bereit", 2000)
+        msg = getattr(self, "_pending_status", None)
+        self._pending_status = None
+        if msg:
+            self.statusBar().showMessage(msg, 10000)
+        else:
+            self.statusBar().showMessage("Bereit", 2000)
 
     def _step(self, d):
         r = self.film.currentRow() + d
@@ -781,6 +827,8 @@ class MainWindow(QMainWindow):
         if self.image is None:
             return
         p, info = ai_remove_background(self.image.linear, self.params)
+        if p is not None:
+            p.key_mode, p.key_mask = 0.0, ""
         if p is None:
             QMessageBox.information(
                 self, APP_TITLE,
@@ -802,18 +850,176 @@ class MainWindow(QMainWindow):
 
     def _sync_key_ui(self):
         p = self.params
-        analysed = p.key_level > 0
+        ai_mode = p.key_mode == 1.0
+        analysed = bool(p.key_mask) if ai_mode else p.key_level > 0
         self._block_key = True
         self.key_enable.setChecked(bool(p.key_enabled) and analysed)
         self._block_key = False
         self.key_enable.setEnabled(analysed)
         for w_ in self.key_controls:
             w_.setEnabled(analysed and bool(p.key_enabled))
-        if analysed:
+        if ai_mode:
+            self.s_key_spill.setEnabled(False)  # no screen colour to remove
+        if analysed and ai_mode:
+            self.key_info.setText("KI-Maske (BiRefNet). Für Transparenz als PNG exportieren.")
+        elif analysed:
             name = CHANNEL_NAMES.get(int(p.key_channel), "Grün")
             self.key_info.setText(f"Erkannt: {name}screen. Für Transparenz als PNG exportieren.")
         else:
-            self.key_info.setText("Erkennt Green-/Bluescreens automatisch.")
+            self.key_info.setText("Greenscreen: schnell, ohne Download. Jedes Foto: neuronales Netz "
+                                  "(einmaliger Download, 224 MB).")
+
+    # ------------------------------------------------------------- AI models
+    def _fill_accel_menu(self):
+        from .ai import engine as ai_engine
+        self.accel_menu.clear()
+        devices = ai_engine.discover()
+        current = ai_engine.preferred()
+        group = []
+        entries = [("auto", "Automatisch (beste verfügbare Hardware)")] + \
+                  [(d.id, ai_engine.describe(d)) for d in devices]
+        for dev_id, text in entries:
+            a = QAction(text, self, checkable=True)
+            a.setChecked(dev_id == current)
+            a.triggered.connect(lambda _=False, i=dev_id: self._set_accel(i))
+            self.accel_menu.addAction(a)
+            group.append(a)
+        if not devices:
+            self.accel_menu.addAction("Keine KI-Laufzeit gefunden").setEnabled(False)
+
+    def _set_accel(self, dev_id):
+        from .ai import engine as ai_engine
+        ai_engine.set_preferred(dev_id)
+        ai_engine.reset()
+        self.settings.set("ai_device", dev_id)
+        self.statusBar().showMessage(f"KI-Beschleuniger: {dev_id if dev_id != 'auto' else 'Automatisch'}", 4000)
+
+    def _run_with_progress(self, title, fn, on_done, determinate=True):
+        """Run ``fn(progress, cancelled)`` in the background with a progress dialog."""
+        dlg = QProgressDialog(title, "Abbrechen", 0, 1000 if determinate else 0, self)
+        dlg.setWindowModality(Qt.WindowModal)
+        dlg.setMinimumDuration(0)
+        dlg.setValue(0)
+        state = {"cancel": False}
+        dlg.canceled.connect(lambda: state.update(cancel=True))
+        t = Task(("ai",), fn, None, None)
+        sig = t.signals
+        t.args = (lambda f, sig=sig: sig.progress.emit(int(f * 1000), ""), lambda: state["cancel"])
+        if determinate:
+            sig.progress.connect(lambda v, _t: dlg.setValue(min(v, 999)))
+
+        def done(tag, res):
+            self._tasks.discard(sig)
+            dlg.reset()
+            QApplication.restoreOverrideCursor()
+            if not state["cancel"]:
+                on_done(res)
+
+        def fail(tag, msg):
+            self._tasks.discard(sig)
+            dlg.reset()
+            QApplication.restoreOverrideCursor()
+            if not state["cancel"]:
+                QMessageBox.warning(self, APP_TITLE, msg)
+
+        sig.done.connect(done)
+        sig.failed.connect(fail)
+        self._tasks.add(sig)
+        self.pool.start(t)
+
+    def _ensure_model(self, model_id, then):
+        """Download a model on first use (asks first, shows size and licence)."""
+        from .ai import models as ai_models
+        if ai_models.is_available(model_id):
+            then()
+            return
+        m = ai_models.MODELS[model_id]
+        size = m.download_size / 1e6
+        if QMessageBox.question(
+                self, APP_TITLE,
+                f"Für diese Funktion wird das KI-Modell „{m.title}“ benötigt.\n\n"
+                f"Download: {size:.0f} MB (einmalig)\nLizenz: {m.license}\nQuelle: {m.source}\n\n"
+                "Jetzt herunterladen?") != QMessageBox.Yes:
+            return
+
+        def job(progress, cancelled):
+            ai_models.download(model_id, lambda d, t: (progress(d / max(t, 1)), not cancelled())[1])
+            return True
+
+        self._run_with_progress(f"Lade {m.title} ({size:.0f} MB) …", job, lambda _r: then())
+
+    def apply_ai_background(self):
+        if self.image is None:
+            return
+        self._ensure_model("birefnet", self._run_ai_background)
+
+    def _run_ai_background(self):
+        from .ai import features as ai_features
+        image = self.image
+        QApplication.setOverrideCursor(Qt.WaitCursor)
+        self.statusBar().showMessage("KI erkennt das Motiv …")
+
+        def job(progress, cancelled):
+            return ai_features.compute_mask(image.path, image.linear)
+
+        def done(key):
+            if self.image is not image:
+                return
+            p = self.params.copy()
+            p.key_enabled, p.key_mode, p.key_mask = 1.0, 1.0, key
+            self._set_params(p)
+            self.statusBar().showMessage(
+                f"Hintergrund entfernt (BiRefNet) – berechnet auf {ai_features.used_device('birefnet')}. "
+                "PNG-Export behält die Transparenz.", 8000)
+
+        self._run_with_progress("Hintergrund wird erkannt …", job, done, determinate=False)
+
+    def ai_enhance(self):
+        if self.image is None:
+            return
+        denoise = self.enh_denoise.isChecked()
+        scale = int(self.enh_scale.currentData())
+        if not denoise and scale == 1:
+            QMessageBox.information(self, APP_TITLE, "Bitte Entrauschen und/oder Hochskalieren auswählen.")
+            return
+        needed = (["scunet"] if denoise else []) + (["realesr"] if scale > 1 else [])
+
+        def chain(i=0):
+            if i < len(needed):
+                self._ensure_model(needed[i], lambda: chain(i + 1))
+            else:
+                self._run_enhance(denoise, scale)
+        chain()
+
+    def _run_enhance(self, denoise, scale):
+        from .ai import features as ai_features
+        src = self.image.path
+        w, h = self.image.full_size
+        if w * h * scale * scale > ai_features.MAX_OUTPUT_PIXELS:
+            QMessageBox.warning(self, APP_TITLE, f"Das Ergebnis wäre {w * scale}×{h * scale} Pixel – zu groß. "
+                                "Bitte eine kleinere Vergrößerung wählen.")
+            return
+        strength = self.s_enh_strength.value() / 100.0 if denoise else 0.0
+        dst = ai_features.enhance_output_path(src, denoise, scale)
+        params = self.params.copy()
+        if params.key_mode == 1.0:  # the AI mask belongs to the old file
+            params.key_enabled, params.key_mask = 0.0, ""
+
+        def job(progress, cancelled):
+            try:
+                return ai_features.enhance(src, dst, strength, scale, progress, cancelled)
+            except InterruptedError:
+                if os.path.exists(dst):
+                    os.remove(dst)
+                raise
+
+        def done(path):
+            self.store.set(path, params)
+            used = ai_features.used_device("scunet" if denoise else "realesr")
+            self._pending_status = f"Gespeichert: {os.path.basename(path)} – berechnet auf {used}"
+            self.open_paths([path])
+
+        self._run_with_progress(f"KI-Verbessern: {os.path.basename(src)} …", job, done)
 
     def apply_ai_selected(self):
         paths = self._selected_paths()
@@ -1083,6 +1289,25 @@ def main(argv=None):
     if "--gpu-info" in argv:  # quick diagnostics: is the GPU usable?
         print(gpu.status())
         return 0 if gpu.available() else 1
+    if "--ai-info" in argv:  # diagnostics: which accelerators can run the AI models?
+        from .ai import engine as ai_engine, models as ai_models
+        import numpy as _np
+        print(gpu.status())
+        devices = ai_engine.discover()
+        print("KI-Beschleuniger:")
+        for d in devices:
+            ai_engine.set_preferred(d.id)
+            ai_engine.reset()
+            try:
+                ai_engine.run("realesr", _np.random.rand(1, 3, 64, 64).astype(_np.float32))
+                used = ai_engine.last_device("realesr")
+                ok = "funktioniert" if used and used.id == d.id else "Rückfall auf CPU"
+            except Exception as exc:  # noqa: BLE001
+                ok = f"Fehler: {exc}"
+            print(f"  {ai_engine.describe(d):60s} {ok}")
+        print("Modelle:", ", ".join(f"{m.title}: {'installiert' if ai_models.is_available(k) else 'wird bei Bedarf geladen'}"
+                                     for k, m in ai_models.MODELS.items()))
+        return 0
     if "--version" in argv:
         print(f"{APP_TITLE} {__version__}")
         return 0

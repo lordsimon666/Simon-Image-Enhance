@@ -31,6 +31,7 @@ Architecture: $ARCH
 Installed-Size: $SIZE
 Maintainer: Simon <noreply@github.com>
 Depends: libc6 (>= 2.35), libegl1, libgl1, libfontconfig1, libfreetype6, libdbus-1-3, libxkbcommon0, libxkbcommon-x11-0, libxcb-cursor0, libxcb-icccm4, libxcb-image0, libxcb-keysyms1, libxcb-randr0, libxcb-render-util0, libxcb-shape0, libxcb-xinerama0, libxcb-xkb1, libglib2.0-0 | libglib2.0-0t64
+Recommends: libvulkan1, mesa-vulkan-drivers, mesa-opencl-icd
 Homepage: https://github.com/lordsimon666/Simon-Image-Enhance
 Description: Lightroom-style photo editor with AI auto correction
  Non-destructive editing of JPEG, PNG and camera RAW files: white balance,

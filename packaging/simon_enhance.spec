@@ -17,6 +17,7 @@ EXCLUDES = [
     "PySide6.QtPositioning", "PySide6.QtSensors", "PySide6.QtSerialPort", "PySide6.QtWebSockets",
     "PySide6.QtOpenGL", "PySide6.QtOpenGLWidgets", "PySide6.QtSpatialAudio", "PySide6.QtTextToSpeech",
     "matplotlib", "scipy", "pandas", "IPython", "pytest", "lxml", "PIL.ImageTk",
+    "torch", "torchvision", "tensorflow", "onnx", "pnnx", "sympy", "einops",
 ]
 
 # GPU acceleration (OpenCL) is optional at runtime but bundled: collect pyopencl's
@@ -26,6 +27,17 @@ try:
     cl_datas, cl_binaries, cl_hidden = collect_all("pyopencl")
 except Exception:
     cl_datas, cl_binaries, cl_hidden = [], [], []
+# AI runtimes: ONNX Runtime (OpenVINO on Linux / DirectML on Windows), ncnn (Vulkan),
+# wgpu (Vulkan compute). collect_all picks up their native libraries and resources.
+for _pkg in ("onnxruntime", "ncnn", "wgpu"):
+    try:
+        _d, _b, _h = collect_all(_pkg)
+        cl_datas += _d
+        cl_binaries += _b
+        cl_hidden += _h
+    except Exception:
+        pass
+
 # never ship a CPU OpenCL implementation that may be installed for tests
 cl_binaries = [b for b in cl_binaries if "pocl" not in os.path.basename(b[0]).lower()]
 cl_datas = [d for d in cl_datas if "pocl" not in os.path.basename(d[0]).lower()]
@@ -35,7 +47,9 @@ a = Analysis(
     pathex=[ROOT],
     binaries=cl_binaries,
     datas=[(os.path.join(ROOT, "simon_enhance", "assets"), "simon_enhance/assets")] + cl_datas,
-    hiddenimports=["rawpy", "rawpy._rawpy", "imageio.v3", "imageio.plugins.pillow"] + cl_hidden,
+    hiddenimports=["rawpy", "rawpy._rawpy", "imageio.v3", "imageio.plugins.pillow", "tifffile",
+                   "simon_enhance.ai.engine", "simon_enhance.ai.models", "simon_enhance.ai.features",
+                   "simon_enhance.vulkan_compute"] + cl_hidden,
     excludes=EXCLUDES,
     noarchive=False,
 )

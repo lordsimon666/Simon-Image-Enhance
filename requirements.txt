@@ -3,4 +3,15 @@ numpy>=1.24
 Pillow>=10.0
 rawpy>=0.19
 imageio>=2.31
+tifffile>=2023.1
+# GPU (OpenCL + Vulkan) for the background-removal filters
 pyopencl>=2024.1
+wgpu>=0.19
+# neural networks: ncnn (Vulkan, any GPU incl. NVIDIA Tensor cores) ...
+ncnn>=1.0.20240410
+# ... and ONNX Runtime, in the variant that reaches the most hardware per platform:
+#   Linux x86_64 -> OpenVINO (Intel NPU, Intel GPU, CPU)
+#   Windows      -> DirectML (any DirectX 12 GPU incl. NVIDIA Tensor cores, AMD, Intel, Intel NPU)
+onnxruntime-openvino>=1.20; sys_platform == "linux" and platform_machine == "x86_64"
+onnxruntime-directml>=1.20; sys_platform == "win32"
+onnxruntime>=1.18; sys_platform == "darwin" or (sys_platform == "linux" and platform_machine != "x86_64")

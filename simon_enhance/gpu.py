@@ -1,5 +1,6 @@
-"""Optional GPU acceleration via OpenCL (AMD / Intel via Mesa or vendor drivers,
-NVIDIA drivers, Windows GPU drivers).
+"""Optional GPU acceleration for the background-removal filters: Vulkan (via wgpu,
+see vulkan_compute.py) or OpenCL (AMD / Intel via Mesa or vendor drivers, NVIDIA
+drivers, Windows GPU drivers).
 
 Only the expensive windowed filters of the background removal run on the GPU (they
 dominate its run time). Everything works without a GPU: if pyopencl or an OpenCL
@@ -7,6 +8,7 @@ driver is missing, or anything fails, the NumPy implementation is used.
 
 Environment variables
     SIE_GPU=0                 disable the GPU completely
+    SIE_VULKAN=0              do not use Vulkan (wgpu), only OpenCL
     SIE_OPENCL_ALLOW_CPU=1    also accept CPU OpenCL devices (used by the tests)
     RUSTICL_ENABLE            Mesa OpenCL drivers to use (default here: radeonsi,iris)
 """
@@ -153,16 +155,26 @@ def status() -> str:
     """Human readable status for the UI."""
     if not is_enabled():
         return "GPU-Beschleunigung ausgeschaltet"
+    from . import vulkan_compute as vk
+    parts = []
+    if vk.available():
+        parts.append(f"Vulkan: {vk.name()}")
     name = device_name()
     if name:
-        return f"GPU: {name}"
-    return f"Keine GPU-Beschleunigung: {_state['error']}"
+        parts.append(f"OpenCL: {name}")
+    if parts:
+        return "GPU: " + " · ".join(parts)
+    return (f"Keine GPU-Beschleunigung: Vulkan – {vk.error()}; OpenCL – {_state['error']}")
 
 
 def box(x: np.ndarray, r: int) -> np.ndarray | None:
     """GPU box filter, or None if the CPU should do it (small input / no GPU / error)."""
     if not _state["enabled"] or x.size < MIN_PIXELS:
         return None
+    from . import vulkan_compute as vk
+    res = vk.box(x, r)  # Vulkan first: available with every GPU driver, also in Flatpak
+    if res is not None:
+        return res
     with _lock:
         if not _init():
             return None

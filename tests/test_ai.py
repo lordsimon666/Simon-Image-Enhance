@@ -1,0 +1,167 @@
+"""AI engine and features. The small upscaling model ships with the app and is always
+tested. The large models (BiRefNet 224 MB, SCUNet 77 MB) are tested when they are
+installed or SIE_AI_DOWNLOAD=1 allows downloading them."""
+import os
+
+import numpy as np
+import pytest
+from PIL import Image
+
+from simon_enhance.ai import engine as E, models as M
+
+
+@pytest.fixture(autouse=True)
+def fresh_engine(monkeypatch):
+    E.reset()
+    E.set_preferred("auto")
+    yield
+    E.reset()
+
+
+def _need(model_id):
+    if not M.is_available(model_id):
+        if os.environ.get("SIE_AI_DOWNLOAD") != "1":
+            pytest.skip(f"Modell {model_id} nicht installiert (SIE_AI_DOWNLOAD=1 lädt es)")
+        M.download(model_id)
+
+
+def _photo(h=150, w=200):
+    y, x = np.mgrid[0:h, 0:w] / np.array([h, w])[:, None, None]
+    img = np.stack([0.5 + 0.4 * np.sin(x * 9), 0.4 + 0.3 * y, 0.3 + 0.2 * np.cos(y * 7)], -1)
+    img[40:90, 60:140] = (0.9, 0.85, 0.2)  # sharp-edged object
+    return img.astype(np.float32)
+
+
+def test_bundled_model_present_and_verified():
+    import hashlib
+    f = M.MODELS["realesr"].files[0]
+    path = M.path_of(f)
+    assert os.path.exists(path)
+    assert hashlib.sha256(open(path, "rb").read()).hexdigest() == f.sha256
+    assert M.ncnn_paths("realesr") is not None
+
+
+def test_cpu_device_always_present():
+    assert any(d.kind == "cpu" for d in E.discover(refresh=True))
+
+
+def test_upscale_tiled_matches_shape_and_content():
+    img = _photo()
+    up = E.run_tiled("realesr", img)
+    assert up.shape == (img.shape[0] * 4, img.shape[1] * 4, 3)
+    small = np.asarray(Image.fromarray((up * 255).astype(np.uint8)).resize((img.shape[1], img.shape[0]),
+                                                                          Image.Resampling.BOX), np.float32) / 255
+    assert np.abs(small - img).mean() < 0.03      # same picture, just bigger
+    assert E.last_device("realesr") is not None
+
+
+def test_tiles_are_seamless():
+    img = np.full((300, 300, 3), 0.5, np.float32)  # flat image: tile borders would show up
+    up = E.run_tiled("realesr", img)
+    assert up.std() < 0.01
+
+
+def test_fallback_to_next_device(monkeypatch):
+    bad = E.Device("ort:broken:0", "Kaputtes Gerät", "dgpu", "onnxruntime")
+    devs = [bad] + [d for d in E.discover() if d.kind == "cpu"]
+    monkeypatch.setattr(E, "discover", lambda refresh=False: devs)
+    out = E.run("realesr", np.random.rand(1, 3, 32, 32).astype(np.float32))
+    assert out.shape == (1, 3, 128, 128)
+    assert E.last_device("realesr").kind == "cpu"
+    assert ("realesr", bad.id) in E._failed
+
+
+def test_vulkan_ncnn_matches_onnx(monkeypatch):
+    monkeypatch.setenv("SIE_ALLOW_CPU_VULKAN", "1")
+    vk = [d for d in E.discover(refresh=True) if d.runtime == "ncnn"]
+    if not vk:
+        pytest.skip("kein Vulkan-Gerät")
+    x = np.random.default_rng(0).random((1, 3, 48, 48)).astype(np.float32)
+    E.set_preferred("ort:cpu")
+    ref = E.run("realesr", x)
+    E.set_preferred(vk[0].id)
+    out = E.run("realesr", x)
+    assert E.last_device("realesr").runtime == "ncnn"
+    assert np.abs(out - ref).mean() < 0.01          # fp16 on the GPU
+    monkeypatch.delenv("SIE_ALLOW_CPU_VULKAN")
+    E.discover(refresh=True)
+
+
+def test_enhance_upscale_writes_16bit_tiff(tmp_path):
+    from simon_enhance.ai import features as F
+    from simon_enhance.fileio import load_image, load_source
+    src = tmp_path / "s.png"
+    Image.fromarray((_photo(120, 160) * 255).astype(np.uint8)).save(src)
+    for scale, size in ((2, (320, 240)), (4, (640, 480))):
+        dst = F.enhance_output_path(str(src), False, scale)
+        seen = []
+        F.enhance(str(src), dst, 0.0, scale, progress=seen.append)
+        assert seen[-1] == 1.0
+        d = load_source(dst)
+        assert d.full_size == size and d.linear.kind == "srgb16"
+        assert load_image(dst).linear.shape[:2] == (size[1], size[0])
+
+
+def test_enhance_refuses_huge_output(tmp_path):
+    from simon_enhance.ai import features as F
+    src = tmp_path / "s.png"
+    Image.fromarray(np.zeros((100, 100, 3), np.uint8)).save(src)
+    old = F.MAX_OUTPUT_PIXELS
+    F.MAX_OUTPUT_PIXELS = 100 * 100 * 4
+    try:
+        with pytest.raises(ValueError):
+            F.enhance(str(src), str(tmp_path / "o.tif"), 0.0, 4)
+    finally:
+        F.MAX_OUTPUT_PIXELS = old
+
+
+def test_sample_mask_bilinear():
+    from simon_enhance.ai.features import sample_mask
+    m = np.zeros((10, 10), np.float32)
+    m[:, 5:] = 1
+    full = sample_mask(m, 0, 100, 100, 100)
+    assert full.shape == (100, 100)
+    assert full[:, :40].max() == 0 and full[:, 60:].min() == 1
+    strip = sample_mask(m, 30, 20, 100, 100)
+    assert np.allclose(strip, full[30:50])
+
+
+def test_download_verifies_checksum(tmp_path, monkeypatch):
+    import io
+    monkeypatch.setenv("XDG_DATA_HOME", str(tmp_path))
+    monkeypatch.setattr(M, "models_dir", lambda: str(tmp_path))
+    f = M.ModelFile("fake.onnx", "https://example.invalid/fake.onnx", "0" * 64, 5)
+    info = M.ModelInfo("fake", "Fake", "MIT", "-", (f,))
+    monkeypatch.setitem(M.MODELS, "fake", info)
+
+    class R(io.BytesIO):
+        def __enter__(self): return self
+        def __exit__(self, *a): return False
+    with pytest.raises(IOError):
+        M.download("fake", opener=lambda url, timeout: R(b"hello"))
+    assert not os.path.exists(tmp_path / "fake.onnx")  # never keeps an unverified file
+
+
+def test_ai_background_mask_on_studio_image(tmp_path):
+    _need("birefnet")
+    import sys
+    sys.path.insert(0, os.path.dirname(__file__))
+    from test_greenscreen import studio
+    from simon_enhance.ai import features as F
+    from simon_enhance.processing import Params, Renderer, srgb_to_linear
+    img, subject = studio(size=(400, 300))
+    src = tmp_path / "studio.png"
+    Image.fromarray((img * 255).astype(np.uint8)).save(src)
+    key = F.compute_mask(str(src), srgb_to_linear(img))
+    p = Params(key_enabled=1.0, key_mode=1.0, key_mask=key)
+    _, a = Renderer(p).apply_rgba(srgb_to_linear(img))
+    assert a[subject].mean() > 0.9 and a[~subject].mean() < 0.1
+
+
+def test_denoise_reduces_noise(tmp_path):
+    _need("scunet")
+    rng = np.random.default_rng(0)
+    clean = _photo(128, 128)
+    noisy = np.clip(clean + rng.normal(0, 0.06, clean.shape), 0, 1).astype(np.float32)
+    out = E.run_tiled("scunet", noisy)
+    assert np.abs(out - clean).mean() < 0.6 * np.abs(noisy - clean).mean()

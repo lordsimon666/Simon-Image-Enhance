@@ -14,6 +14,8 @@ gespeichert und erst beim Export angewendet.
 | **Gradationskurve** | Interaktive Kurven für RGB, Rot, Grün, Blau (Klick = Punkt, Ziehen = verschieben, Rechtsklick/Doppelklick = löschen) |
 | **KI-Korrektur** | Analysiert das Bild und setzt **nur Weißabgleich und Gradationskurven** automatisch. Stärke einstellbar, danach alles feinjustierbar. Auch für mehrere Bilder auf einmal. |
 | **Hintergrund entfernen (KI)** | Erkennt Green- und Bluescreens automatisch und macht sie transparent – auch bei Falten, Schatten und ungleichmäßiger Ausleuchtung. Regler für Toleranz, Weichheit, Kante und Entfärben (entfernt grüne Reflexe). PNG-Export speichert die Transparenz (8 und 16 Bit), JPEG bekommt eine wählbare Hintergrundfarbe. |
+| **Hintergrund entfernen – jedes Foto** | Neuronales Netz (BiRefNet) stellt Personen und Objekte frei, ganz ohne Greenscreen; Kanten werden in voller Auflösung verfeinert. Export als transparentes PNG. |
+| **KI-Verbessern** | Entrauschen (SCUNet) und Hochskalieren 2×/4× (Real-ESRGAN) des Originals in eine **neue 16-Bit-TIFF-Datei** – wie „Verbessern“ in Lightroom |
 | **Tonwert / Präsenz** | Belichtung, Kontrast, Lichter, Tiefen, Weiß, Schwarz, Dynamik, Sättigung |
 | **Import** | JPEG, PNG (mit Transparenz; 16-Bit-PNGs werden derzeit mit 8 Bit gelesen), TIFF, WebP, Fotos bis 1 Gigapixel (z. B. 200-MP-Handykameras) und **RAW** (DNG, CR2, CR3, NEF, ARW, RAF, ORF, RW2, PEF, SRW … über LibRaw) |
 | **Export** | JPEG (Qualität, EXIF) und PNG (8/16 Bit), Größe begrenzen, Stapel-Export |
@@ -49,10 +51,43 @@ Läuft komplett offline auf deinem Rechner, ohne Cloud.
 
 Die KI-Farbkorrektur analysiert bei entferntem Hintergrund nur noch das Motiv.
 
-## GPU-Beschleunigung
+## KI-Funktionen und Beschleuniger (NPU, Tensor-Kerne, Vulkan)
 
-Die rechenintensiven Filter der Hintergrundentfernung laufen über **OpenCL** auf der
-Grafikkarte. Ohne passende Grafikkarte oder Treiber rechnet die App automatisch auf dem
+Die neuronalen Netze laufen auf der stärksten verfügbaren Hardware; kann ein Gerät ein
+Modell nicht ausführen, wird automatisch das nächste genutzt (bis zur CPU).
+Auswahl: *Einstellungen → KI-Beschleuniger*. Prüfen, was auf deinem Rechner funktioniert:
+
+```bash
+simon-image-enhance --ai-info
+```
+
+| Weg | Hardware | Plattform |
+|---|---|---|
+| ONNX Runtime + **OpenVINO** | **Intel-NPU** (Core Ultra „AI Boost“), Intel-GPU | Linux |
+| ONNX Runtime + **DirectML** | jede DirectX-12-GPU: NVIDIA (**Tensor-Kerne**), AMD, Intel; Intel-NPU | Windows |
+| **ncnn + Vulkan** | jede Vulkan-GPU: NVIDIA (**Tensor-Kerne** über *cooperative matrix*), AMD, Intel – auch im Flatpak | Linux, Windows |
+| ONNX Runtime CPU | jeder Prozessor | überall |
+
+| Funktion | Modell (Lizenz) | Download | läuft auf |
+|---|---|---|---|
+| Hintergrund entfernen | BiRefNet-lite (MIT) | 224 MB, einmalig | NPU*, DirectML-GPU, CPU |
+| Entrauschen | SCUNet real (Apache-2.0/MIT) | 77 MB, einmalig | NPU*, DirectML-GPU, CPU |
+| Hochskalieren | Real-ESRGAN general-x4v3 (BSD-3) | in der App enthalten | Vulkan-GPU, NPU*, DirectML-GPU, CPU |
+
+\* NPUs können nicht jedes Modell übersetzen – dann übernimmt automatisch die nächste Hardware.
+
+Ehrliche Einschränkungen:
+- Unter **Linux mit NVIDIA- oder AMD-Grafik** nutzt nur das Hochskalieren die Grafikkarte
+  (Vulkan). Hintergrund-KI und Entrauschen laufen dort auf der CPU: ihre Transformer-Netze
+  lassen sich (noch) nicht nach ncnn/Vulkan übertragen, und die CUDA-Variante von ONNX Runtime
+  würde den Download um mehrere Gigabyte vergrößern.
+- AMD-NPUs (Ryzen AI / XDNA) werden nicht unterstützt.
+- Modelle werden von Hugging Face geladen (feste Version, SHA-256-geprüft), danach offline nutzbar.
+
+## GPU-Beschleunigung der Filter
+
+Die rechenintensiven Filter der Hintergrundentfernung laufen über **Vulkan** (wgpu) oder
+**OpenCL** auf der Grafikkarte. Ohne passende Grafikkarte oder Treiber rechnet die App automatisch auf dem
 Prozessor – mit identischem Ergebnis. Ein-/Ausschalten: *Einstellungen → GPU-Beschleunigung*.
 
 Prüfen, ob die Grafikkarte erkannt wird:
@@ -106,7 +141,8 @@ git push origin v1.0.0
 | `Strg+W` / `Strg+Shift+W` | Bild schließen / alle schließen (Rechtsklick im Filmstreifen: weitere Optionen) |
 | `Strg+E` / `Strg+Shift+E` | Exportieren / Auswahl exportieren |
 | `Strg+U` / `Strg+Shift+U` | KI-Korrektur / auf Auswahl anwenden |
-| `Strg+G` | Greenscreen entfernen (KI) |
+| `Strg+G` / `Strg+Shift+G` | Greenscreen entfernen / Hintergrund entfernen (jedes Foto) |
+| `Strg+Alt+E` | KI-Verbessern (Entrauschen / Hochskalieren) |
 | `W` | Weißabgleich-Pipette |
 | `\` | Vorher / Nachher |
 | `Strg+Z` / `Strg+Shift+Z` | Rückgängig / Wiederholen |
@@ -172,6 +208,9 @@ Bearbeitungen werden als JSON gespeichert (Originale bleiben unberührt):
 - Linux: `~/.local/share/SimonImageEnhance/edits`
 - Portabel: Ordner `data` neben der `.exe`
 
+Im selben Ordner liegen unter `models` die heruntergeladenen KI-Modelle und unter `masks`
+die berechneten Freisteller-Masken (beides kann gelöscht werden und wird bei Bedarf neu erzeugt).
+
 ## Projektstruktur
 
 ```
@@ -179,7 +218,11 @@ simon_enhance/
   processing.py   Bildpipeline (Weißabgleich, Tonwerte, Kurven, LUTs)
   auto.py         KI-Korrektur (Weißabgleich + Kurven)
   greenscreen.py  KI-Hintergrundentfernung (Green-/Bluescreen → Transparenz)
-  gpu.py          GPU-Beschleunigung (OpenCL) mit CPU-Rückfall
+  gpu.py          GPU-Beschleunigung der Filter (Vulkan/OpenCL) mit CPU-Rückfall
+  vulkan_compute.py  Vulkan-Compute-Shader (wgpu)
+  ai/engine.py    KI-Laufzeiten: OpenVINO (NPU), DirectML, CUDA, ncnn-Vulkan, CPU
+  ai/models.py    Modellregister, Download mit Prüfsumme
+  ai/features.py  Hintergrund-KI, Entrauschen, Hochskalieren
   fileio.py       Laden (JPEG/PNG/RAW) und Export (JPEG/PNG)
   store.py        Speicherung der Bearbeitungen, Portabel-Modus
   widgets.py      Kurveneditor, Histogramm, Slider, Bildansicht

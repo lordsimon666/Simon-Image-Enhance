@@ -58,3 +58,15 @@ def test_env_switch_disables_gpu(monkeypatch):
     assert gpu.box(np.zeros((1000, 1000), np.float32), 2) is None
     assert "SIE_GPU=0" in gpu.status()
     monkeypatch.setattr(gpu, "_state", dict(gpu._state, tried=False))
+
+
+def test_vulkan_box_matches_cpu(monkeypatch):
+    from simon_enhance import vulkan_compute as vk
+    monkeypatch.setenv("SIE_ALLOW_CPU_VULKAN", "1")
+    monkeypatch.setattr(vk, "_st", dict(vk._st, tried=False, device=None))
+    if not vk.available():
+        pytest.skip("kein Vulkan: " + str(vk.error()))
+    x = np.random.default_rng(3).random((700, 900)).astype(np.float32)
+    for r in (2, 24):
+        assert np.abs(vk.box(x, r) - _box_axis(_box_axis(x, r, 0), r, 1)).max() < 1e-5
+    monkeypatch.setattr(vk, "_st", dict(vk._st, tried=False, device=None))

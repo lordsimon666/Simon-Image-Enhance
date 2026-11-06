@@ -21,9 +21,19 @@ jobs:
       - uses: actions/setup-python@v5
         with:
           python-version: ${{ env.PYTHON_VERSION }}
-      # PoCL = OpenCL on the CPU, so the GPU kernels are tested even without a GPU
+      # PoCL = OpenCL on the CPU, lavapipe = Vulkan on the CPU: the GPU kernels and the
+      # Vulkan inference are tested even without a GPU
+      - run: sudo apt-get update && sudo apt-get install -y mesa-vulkan-drivers libvulkan1 libegl1 libgl1 libxkbcommon0
       - run: pip install -r requirements.txt pytest pocl-binary-distribution
-      - run: python -m pytest -q
+      - name: Cache AI models
+        uses: actions/cache@v4
+        with:
+          path: ~/.local/share/SimonImageEnhance/models
+          key: ai-models-${{ hashFiles('simon_enhance/ai/models.py') }}
+      - name: Tests (incl. the downloadable AI models)
+        env:
+          SIE_AI_DOWNLOAD: "1"
+        run: python -m pytest -q -rs
       - name: GPU kernels were really tested
         run: SIE_OPENCL_ALLOW_CPU=1 python -c "from simon_enhance import gpu; print(gpu.status()); assert gpu.available()"
 
@@ -43,6 +53,7 @@ jobs:
       - name: Smoke test
         shell: pwsh
         run: |
+          python -c "import onnxruntime as o; print(o.get_available_providers())"
           $p = Start-Process dist\SimonImageEnhance\SimonImageEnhance.exe -PassThru
           Start-Sleep 10
           if ($p.HasExited) { throw "App exited early with code $($p.ExitCode)" }
@@ -77,6 +88,7 @@ jobs:
         run: |
           timeout 10 xvfb-run -a dist/SimonImageEnhance/SimonImageEnhance || [ $? -eq 124 ]
           dist/SimonImageEnhance/SimonImageEnhance --gpu-info || true  # no GPU on CI runners
+          dist/SimonImageEnhance/SimonImageEnhance --ai-info
       - name: Tarball
         run: tar -C dist/SimonImageEnhance -czf dist/SimonImageEnhance-linux.tar.gz .
       - name: .deb
@@ -117,6 +129,7 @@ jobs:
           simon-image-enhance --version
           rpm -q mesa-libOpenCL && echo "OpenCL driver installed"
           simon-image-enhance --gpu-info || true   # CI runners have no GPU
+          simon-image-enhance --ai-info
       - name: Smoke test (GUI starts)
         run: |
           Xvfb :99 & sleep 2

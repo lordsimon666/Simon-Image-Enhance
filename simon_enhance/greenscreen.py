@@ -126,6 +126,10 @@ class KeyMatte:
 
     def __init__(self, params, full_height: int):
         self.k = int(params.key_channel) if params.key_channel in (1.0, 2.0) else 1
+        self.ai = getattr(params, "key_mode", 0.0) == 1.0
+        self.mask_key = getattr(params, "key_mask", "")
+        self.tol = params.key_tolerance / 100.0
+        self.soft = params.key_softness / 100.0
         level = max(float(params.key_level), 0.05)
         tol = params.key_tolerance / 100.0      # 0..1, default 0.5
         soft = params.key_softness / 100.0      # 0..1, default 0.5
@@ -149,9 +153,26 @@ class KeyMatte:
         self.pad = (self.radius * 2 + 1 + self.bg_radius + self.speck_radius
                     + self.cluster_radius + 3)
 
-    def matte(self, srgb: np.ndarray) -> np.ndarray:
-        s = _key_excess(srgb, self.k, self.floor)
-        alpha = np.clip((self.t_hi - s) / max(self.t_hi - self.t_lo, 1e-4), 0.0, 1.0).astype(np.float32)
+    def _ai_alpha(self, srgb, y0, full):
+        from .ai.features import load_mask, sample_mask
+        mask = load_mask(self.mask_key)
+        h, w = srgb.shape[:2]
+        if mask is None:
+            return np.ones((h, w), np.float32)
+        fh, fw = full if full else (h, w)
+        m = sample_mask(mask, y0, h, fh, fw)
+        # tolerance shifts the threshold, softness sets the transition width
+        width = 0.08 + 0.8 * self.soft
+        centre = 0.25 + 0.5 * self.tol
+        lo = centre - width / 2
+        return np.clip((m - lo) / width, 0.0, 1.0).astype(np.float32)
+
+    def matte(self, srgb: np.ndarray, y0: int = 0, full=None) -> np.ndarray:
+        if self.ai:
+            alpha = self._ai_alpha(srgb, y0, full)
+        else:
+            s = _key_excess(srgb, self.k, self.floor)
+            alpha = np.clip((self.t_hi - s) / max(self.t_hi - self.t_lo, 1e-4), 0.0, 1.0).astype(np.float32)
         guide = (srgb @ LUM_WEIGHTS).astype(np.float32)
         refined = guided_filter(guide, alpha, self.radius, 2e-3)
         # keep crisp interior / exterior, only let the filter shape the transition
@@ -175,14 +196,15 @@ class KeyMatte:
         alpha[alpha > 0.98] = 1.0
         return alpha
 
-    def apply(self, linear: np.ndarray) -> tuple[np.ndarray, np.ndarray]:
-        """Returns (cleaned linear RGB, alpha)."""
+    def apply(self, linear: np.ndarray, y0: int = 0, full=None) -> tuple[np.ndarray, np.ndarray]:
+        """Returns (cleaned linear RGB, alpha). ``y0`` / ``full`` locate a strip inside
+        the full image (needed for the AI mask)."""
         srgb = linear_to_srgb(linear)
-        alpha = self.matte(srgb)
+        alpha = self.matte(srgb, y0, full)
         out = linear.astype(np.float32, copy=True)
         others = [c for c in range(3) if c != self.k]
         # 1) despill: remove green/blue reflections from the subject
-        if self.despill > 0:
+        if self.despill > 0 and not self.ai:
             limit = np.maximum(out[..., others[0]], out[..., others[1]])
             excess = np.maximum(out[..., self.k] - limit, 0.0)
             out[..., self.k] -= self.despill * excess
@@ -211,6 +233,9 @@ class KeyMatte:
                 keep = np.where(ring[sel], 0.5, 0.25 * alpha[sel] ** 2)[:, None]
                 out[sel] = inner * (1.0 - keep) + own * keep
         # 3) final safety: no key-colour excess may remain anywhere near the edge
+        if self.ai:
+            np.clip(out, 0.0, 1.0, out=out)
+            return out, alpha
         near = touching | (alpha < 1.0)
         limit = np.maximum(out[..., others[0]], out[..., others[1]])
         out[..., self.k] = np.where(near, np.minimum(out[..., self.k], limit), out[..., self.k])
@@ -219,7 +244,11 @@ class KeyMatte:
 
 
 def has_key(params) -> bool:
-    return bool(params.key_enabled) and params.key_level > 0
+    if not params.key_enabled:
+        return False
+    if getattr(params, "key_mode", 0.0) == 1.0:
+        return bool(getattr(params, "key_mask", ""))
+    return params.key_level > 0
 
 
 def checkerboard(h: int, w: int, size: int = 12) -> np.ndarray:

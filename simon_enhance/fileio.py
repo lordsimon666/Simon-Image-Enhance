@@ -183,6 +183,33 @@ def _png_is_16bit_color(path: str) -> bool:
         return False
 
 
+def _load_tiff16(path: str, max_side: int | None, lazy: bool = False):
+    """16-bit RGB(A) TIFFs (e.g. the result of "KI-Verbessern") via tifffile -
+    Pillow would only read them with 8 bit."""
+    if not path.lower().endswith((".tif", ".tiff")):
+        return None
+    try:
+        import tifffile  # type: ignore
+        with tifffile.TiffFile(path) as tf:
+            page = tf.pages[0]
+            if page.dtype != np.uint16 or page.ndim != 3 or page.shape[-1] not in (3, 4):
+                return None
+            arr = page.asarray()
+    except Exception:
+        return None
+    full = (arr.shape[1], arr.shape[0])
+    if lazy:
+        alpha = LazyLinear(arr[..., 3], "alpha16") if arr.shape[2] == 4 else None
+        return LazyLinear(np.ascontiguousarray(arr[..., :3]), "srgb16"), alpha, None, full
+    alpha = arr[..., 3].astype(np.float32) / 65535.0 if arr.shape[2] == 4 else None
+    lin = _lut16()[arr[..., :3]]
+    if max_side:
+        lin = _resize_float(lin, max_side)
+        if alpha is not None:
+            alpha = _resize_float(alpha[..., None], max_side)[..., 0]
+    return lin.astype(np.float32), alpha, None, full
+
+
 def _load_png16(path: str, max_side: int | None, lazy: bool = False):
     """Pillow cannot read 16-bit RGB PNGs at full depth; use imageio if present."""
     try:
@@ -238,8 +265,8 @@ def load_image(path: str, preview: bool = True) -> ImageData:
         lin, alpha, exif, full = _load_raw(path, max_side)
         raw_flag = True
     else:
-        res = None
-        if path.lower().endswith(".png") and _png_is_16bit_color(path):
+        res = _load_tiff16(path, max_side)
+        if res is None and path.lower().endswith(".png") and _png_is_16bit_color(path):
             res = _load_png16(path, max_side)
         if res is None:
             res = _load_raster(path, max_side)
@@ -254,8 +281,8 @@ def load_source(path: str) -> ImageData:
         lin, alpha, exif, full = _load_raw(path, None, lazy=True)
         raw_flag = True
     else:
-        res = None
-        if path.lower().endswith(".png") and _png_is_16bit_color(path):
+        res = _load_tiff16(path, None, lazy=True)
+        if res is None and path.lower().endswith(".png") and _png_is_16bit_color(path):
             res = _load_png16(path, None, lazy=True)
         if res is None:
             res = _load_raster(path, None, lazy=True)

@@ -31,13 +31,18 @@ Requires:       hicolor-icon-theme
 # GPU acceleration: OpenCL driver for AMD / Intel GPUs (Mesa Rusticl). NVIDIA users
 # get OpenCL with the NVIDIA driver (e.g. xorg-x11-drv-nvidia-cuda-libs from RPM Fusion).
 Recommends:     mesa-libOpenCL
+# Vulkan: GPU for the AI models (ncnn) and filters (wgpu) on AMD, Intel and NVIDIA
+Recommends:     vulkan-loader
+Recommends:     mesa-vulkan-drivers
 Suggests:       intel-compute-runtime
 
 %description
 Non-destructive editing of JPEG, PNG and camera RAW files: white balance,
 tone controls, RGB tone curves, an AI correction that automatically sets
 white balance and tone curves, and AI green/blue screen removal with
-transparent PNG export. Uses the GPU via OpenCL when available.
+transparent PNG export, AI background removal for any photo, AI denoising and
+AI upscaling. Uses NPU (Intel, via OpenVINO) and GPUs via Vulkan / OpenCL when
+available, with automatic fallback to the CPU.
 
 %install
 mkdir -p %{buildroot}/opt/%{name} %{buildroot}%{_bindir}

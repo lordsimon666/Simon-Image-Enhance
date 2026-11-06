@@ -18,6 +18,7 @@ from PySide6.QtWidgets import (
 
 from . import __version__
 from .auto import ai_correct
+from .greenscreen import CHANNEL_NAMES, ai_remove_background, checkerboard, composite, has_key
 from .fileio import (
     ExportOptions, ImageData, RAW_EXTS, RASTER_EXTS, export_image, is_supported, load_image,
     load_thumbnail, raw_available,
@@ -93,6 +94,13 @@ class ExportDialog(QDialog):
         self.long_edge.setRange(64, 20000)
         self.long_edge.setSuffix(" px")
         self.keep_exif = QCheckBox("EXIF-Metadaten übernehmen")
+        self.jpeg_bg = QComboBox()
+        self.jpeg_bg.addItem("Weiß", (1.0, 1.0, 1.0))
+        self.jpeg_bg.addItem("Schwarz", (0.0, 0.0, 0.0))
+        self.jpeg_bg.addItem("Grau", (0.5, 0.5, 0.5))
+        self.alpha_hint = QLabel("PNG speichert Transparenz (freigestellter Hintergrund).\n"
+                                 "JPEG kennt keine Transparenz – dort wird die Hintergrundfarbe verwendet.")
+        self.alpha_hint.setStyleSheet("color:#888")
         self.suffix = QLineEdit()
         self.folder = QLineEdit()
         browse = QPushButton("…")
@@ -109,6 +117,8 @@ class ExportDialog(QDialog):
         form.addRow("PNG-Farbtiefe:", self.bits)
         form.addRow(rs)
         form.addRow(self.keep_exif)
+        form.addRow("JPEG-Hintergrund:", self.jpeg_bg)
+        form.addRow("", self.alpha_hint)
         form.addRow("Dateiname-Zusatz:", self.suffix)
         form.addRow("Zielordner:", row)
         hint = QLabel("Leer lassen = Ordner des Originals")
@@ -127,6 +137,7 @@ class ExportDialog(QDialog):
         self.resize_cb.setChecked(bool(s.get("resize", False)))
         self.long_edge.setValue(s.get("long_edge", 3000))
         self.keep_exif.setChecked(s.get("keep_exif", True))
+        self.jpeg_bg.setCurrentIndex(int(s.get("jpeg_bg", 0)))
         self.suffix.setText(s.get("suffix", "_edit"))
         self.folder.setText(s.get("folder", ""))
         self.fmt.currentIndexChanged.connect(self._update)
@@ -137,6 +148,7 @@ class ExportDialog(QDialog):
         jpeg = self.fmt.currentData() == "jpeg"
         self.quality.setEnabled(jpeg)
         self.keep_exif.setEnabled(jpeg)
+        self.jpeg_bg.setEnabled(jpeg)
         self.bits.setEnabled(not jpeg)
         self.long_edge.setEnabled(self.resize_cb.isChecked())
 
@@ -151,11 +163,13 @@ class ExportDialog(QDialog):
             "png_bits": self.bits.currentData(), "resize": self.resize_cb.isChecked(),
             "long_edge": self.long_edge.value(), "keep_exif": self.keep_exif.isChecked(),
             "suffix": self.suffix.text(), "folder": self.folder.text().strip(),
+            "jpeg_bg": self.jpeg_bg.currentIndex(),
         }
         self.settings.set("export", s)
         opts = ExportOptions(fmt=s["fmt"], quality=s["quality"], png_bits=s["png_bits"],
                              long_edge=s["long_edge"] if s["resize"] else None,
-                             keep_exif=s["keep_exif"])
+                             keep_exif=s["keep_exif"],
+                             jpeg_background=tuple(self.jpeg_bg.currentData()))
         return opts, s["folder"], s["suffix"]
 
 
@@ -183,6 +197,7 @@ class MainWindow(QMainWindow):
         self.show_before = False
         self.current_path: str | None = None
         self._tasks = set()
+        self._block_key = False
 
         self.render_timer = QTimer(self)
         self.render_timer.setSingleShot(True)
@@ -195,6 +210,7 @@ class MainWindow(QMainWindow):
 
         self._build_ui()
         self._build_actions()
+        self._sync_key_ui()
         self._set_enabled(False)
         self.statusBar().showMessage(
             "Bild oder Ordner öffnen (Strg+O / Strg+Shift+O) – oder Dateien hier hineinziehen."
@@ -253,6 +269,36 @@ class MainWindow(QMainWindow):
         note.setStyleSheet("color:#888;font-size:11px")
         al.addWidget(note)
         pl.addWidget(ai)
+
+        # Background removal
+        bgr = QGroupBox("Hintergrund entfernen (KI)")
+        bl = QVBoxLayout(bgr)
+        self.key_btn = QPushButton("✨  Greenscreen entfernen")
+        self.key_btn.setObjectName("accent")
+        self.key_btn.setMinimumHeight(34)
+        self.key_btn.setToolTip("Erkennt Green- oder Bluescreen automatisch und macht ihn "
+                                "transparent (Strg+G). PNG-Export speichert die Transparenz.")
+        self.key_btn.clicked.connect(self.apply_key)
+        self.key_enable = QCheckBox("Hintergrund entfernt")
+        self.key_enable.toggled.connect(self._on_key_toggled)
+        self.key_info = QLabel("")
+        self.key_info.setStyleSheet("color:#888;font-size:11px")
+        self.key_info.setWordWrap(True)
+        self.s_key_tol = SliderRow("Toleranz", 0, 100, 50)
+        self.s_key_tol.setToolTip("Höher = mehr vom Hintergrund wird entfernt")
+        self.s_key_soft = SliderRow("Weichheit", 0, 100, 50)
+        self.s_key_soft.setToolTip("Breite des weichen Übergangs an den Kanten")
+        self.s_key_edge = SliderRow("Kante", -100, 100, 25)
+        self.s_key_edge.setToolTip("Positiv: Kante nach innen ziehen (entfernt Farbsäume), negativ: erweitern")
+        self.s_key_spill = SliderRow("Entfärben", 0, 100, 80)
+        self.s_key_spill.setToolTip("Entfernt grüne/blaue Reflexe (Spill) auf Haut, Haaren und Kleidung")
+        bl.addWidget(self.key_btn)
+        bl.addWidget(self.key_enable)
+        for w_ in (self.s_key_tol, self.s_key_soft, self.s_key_edge, self.s_key_spill):
+            bl.addWidget(w_)
+        bl.addWidget(self.key_info)
+        self.key_controls = (self.s_key_tol, self.s_key_soft, self.s_key_edge, self.s_key_spill)
+        pl.addWidget(bgr)
 
         # White balance
         wb = QGroupBox("Weißabgleich")
@@ -336,6 +382,8 @@ class MainWindow(QMainWindow):
             "contrast": self.s_contrast, "highlights": self.s_high, "shadows": self.s_shadow,
             "whites": self.s_whites, "blacks": self.s_blacks, "vibrance": self.s_vib,
             "saturation": self.s_sat,
+            "key_tolerance": self.s_key_tol, "key_softness": self.s_key_soft,
+            "key_edge": self.s_key_edge, "key_despill": self.s_key_spill,
         }
         for key, s in self.sliders.items():
             s.valueChanged.connect(lambda v, k=key: self._on_slider(k, v))
@@ -390,6 +438,7 @@ class MainWindow(QMainWindow):
         e.addSeparator()
         act(e, "KI-Korrektur", self.apply_ai, "Ctrl+U")
         act(e, "KI-Korrektur auf Auswahl anwenden", self.apply_ai_selected, "Ctrl+Shift+U")
+        act(e, "Greenscreen entfernen (KI)", self.apply_key, "Ctrl+G")
         act(e, "Weißabgleich-Pipette", lambda: self.picker_btn.toggle(), "W")
         act(e, "Alles zurücksetzen", self.reset_all, "Ctrl+Shift+R")
 
@@ -461,7 +510,10 @@ class MainWindow(QMainWindow):
         if p is not None and not p.is_default():
             # show edited thumbnail
             from .processing import srgb_to_linear
-            arr = to_uint8(Renderer(p).apply(srgb_to_linear(arr.astype(np.float32) / 255.0)))
+            rgb, a = Renderer(p).apply_rgba(srgb_to_linear(arr.astype(np.float32) / 255.0))
+            if a is not None:
+                rgb = composite(rgb, a, checkerboard(*a.shape, size=8))
+            arr = to_uint8(rgb)
         return arr
 
     def _run(self, tag, fn, *args, pool=None):
@@ -536,6 +588,7 @@ class MainWindow(QMainWindow):
             s.setValue(getattr(p, key))
         self.curve.set_curves(p.curves)
         self._sync_wb_preset()
+        self._sync_key_ui()
 
     def _sync_wb_preset(self):
         p = self.params
@@ -618,6 +671,44 @@ class MainWindow(QMainWindow):
         self.wb_preset.setCurrentText("Auto")
         self.statusBar().showMessage(
             f"KI-Korrektur: Temperatur {p.temp:.0f} K, Tönung {p.tint:+.0f}, Kurven gesetzt", 4000)
+
+    def apply_key(self):
+        if self.image is None:
+            return
+        p, info = ai_remove_background(self.image.linear, self.params)
+        if p is None:
+            QMessageBox.information(
+                self, APP_TITLE,
+                "Kein Green- oder Bluescreen erkannt.\n\nDer Hintergrund muss am oberen, linken "
+                "und rechten Bildrand überwiegend aus einer kräftig grünen oder blauen Fläche bestehen.")
+            return
+        self._set_params(p)
+        self.statusBar().showMessage(
+            f"{CHANNEL_NAMES[info['channel']]}screen entfernt – ca. {info['coverage'] * 100:.0f} % "
+            "des Bildes sind jetzt transparent. PNG-Export behält die Transparenz.", 6000)
+
+    def _on_key_toggled(self, on):
+        if self._block_key:
+            return
+        self.params.key_enabled = 1.0 if on else 0.0
+        self._sync_key_ui()
+        self._request_render()
+        self.commit_timer.start()
+
+    def _sync_key_ui(self):
+        p = self.params
+        analysed = p.key_level > 0
+        self._block_key = True
+        self.key_enable.setChecked(bool(p.key_enabled) and analysed)
+        self._block_key = False
+        self.key_enable.setEnabled(analysed)
+        for w_ in self.key_controls:
+            w_.setEnabled(analysed and bool(p.key_enabled))
+        if analysed:
+            name = CHANNEL_NAMES.get(int(p.key_channel), "Grün")
+            self.key_info.setText(f"Erkannt: {name}screen. Für Transparenz als PNG exportieren.")
+        else:
+            self.key_info.setText("Erkennt Green-/Bluescreens automatisch.")
 
     def apply_ai_selected(self):
         paths = self._selected_paths()
@@ -726,10 +817,15 @@ class MainWindow(QMainWindow):
         if self.image is None:
             return
         p = Params() if self.show_before else self.params
-        img8 = to_uint8(Renderer(p).apply(self.image.linear.copy()))
+        rgb, alpha = Renderer(p).apply_rgba(self.image.linear, self.image.alpha)
+        hist8 = to_uint8(rgb if alpha is None else rgb[alpha > 0.5][None])
+        if alpha is not None:
+            h, w = alpha.shape
+            rgb = composite(rgb, alpha, checkerboard(h, w, max(8, round(max(h, w) / 120))))
+        img8 = to_uint8(rgb)
         self.view.set_image(img8, refit=refit)
-        self.histogram.set_image(img8)
-        self.curve.set_histogram(img8)
+        self.histogram.set_image(hist8 if hist8.size else img8)
+        self.curve.set_histogram(hist8 if hist8.size else img8)
 
     # ------------------------------------------------------------- export
     def export_current(self):

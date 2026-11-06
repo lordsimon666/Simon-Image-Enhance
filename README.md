@@ -13,6 +13,7 @@ gespeichert und erst beim Export angewendet.
 | **Weißabgleich** | Temperatur (Kelvin) & Tönung, Pipette (auf neutrale Stelle klicken), Voreinstellungen (Tageslicht, Bewölkt, Kunstlicht …) |
 | **Gradationskurve** | Interaktive Kurven für RGB, Rot, Grün, Blau (Klick = Punkt, Ziehen = verschieben, Rechtsklick/Doppelklick = löschen) |
 | **KI-Korrektur** | Analysiert das Bild und setzt **nur Weißabgleich und Gradationskurven** automatisch. Stärke einstellbar, danach alles feinjustierbar. Auch für mehrere Bilder auf einmal. |
+| **Hintergrund entfernen (KI)** | Erkennt Green- und Bluescreens automatisch und macht sie transparent – auch bei Falten, Schatten und ungleichmäßiger Ausleuchtung. Regler für Toleranz, Weichheit, Kante und Entfärben (entfernt grüne Reflexe). PNG-Export speichert die Transparenz (8 und 16 Bit), JPEG bekommt eine wählbare Hintergrundfarbe. |
 | **Tonwert / Präsenz** | Belichtung, Kontrast, Lichter, Tiefen, Weiß, Schwarz, Dynamik, Sättigung |
 | **Import** | JPEG, PNG (8/16 Bit, Transparenz), TIFF, WebP und **RAW** (DNG, CR2, CR3, NEF, ARW, RAF, ORF, RW2, PEF, SRW … über LibRaw) |
 | **Export** | JPEG (Qualität, EXIF) und PNG (8/16 Bit), Größe begrenzen, Stapel-Export |
@@ -33,6 +34,20 @@ Läuft komplett offline auf deinem Rechner, ohne Cloud.
    Abend- und Low-Key-Bilder ihre Stimmung behalten) und ein angepasster S-Kontrast bestimmt.
    Farbstiche in Tiefen und Lichtern werden über die R/G/B-Kurven entfernt – gemessen nur an
    neutralen Bildbereichen, damit z. B. ein blauer Himmel nicht als Farbstich gilt.
+
+### Wie der Greenscreen-Entferner arbeitet
+
+1. Am oberen, linken und rechten Bildrand wird geprüft, ob dort eine kräftig grüne oder
+   blaue Fläche ist; Farbe und Stärke des Schirms werden gemessen (inkl. Falten/Schatten).
+2. Für jeden Pixel wird der *relative* Grün- bzw. Blauüberschuss berechnet – unabhängig von der
+   Helligkeit, daher stören Falten und Schatten im Stoff nicht. Die Schwellwerte kommen aus der
+   Statistik des gemessenen Schirms.
+3. Die Maske wird kantenbewusst verfeinert (Guided Filter), einzelne Fehlpixel und grüne
+   Reflexe im Motiv werden gefüllt, Einzelpixel im Hintergrund entfernt.
+4. Halbtransparente Kanten werden mit der *lokalen* Hintergrundfarbe entmischt, verbleibende
+   grüne Reflexe auf Haut und Kleidung entfärbt (Despill).
+
+Die KI-Farbkorrektur analysiert bei entferntem Hintergrund nur noch das Motiv.
 
 ## Downloads
 
@@ -64,6 +79,7 @@ git push origin v1.0.0
 | `Strg+O` / `Strg+Shift+O` | Bilder / Ordner öffnen |
 | `Strg+E` / `Strg+Shift+E` | Exportieren / Auswahl exportieren |
 | `Strg+U` / `Strg+Shift+U` | KI-Korrektur / auf Auswahl anwenden |
+| `Strg+G` | Greenscreen entfernen (KI) |
 | `W` | Weißabgleich-Pipette |
 | `\` | Vorher / Nachher |
 | `Strg+Z` / `Strg+Shift+Z` | Rückgängig / Wiederholen |
@@ -131,6 +147,7 @@ Bearbeitungen werden als JSON gespeichert (Originale bleiben unberührt):
 simon_enhance/
   processing.py   Bildpipeline (Weißabgleich, Tonwerte, Kurven, LUTs)
   auto.py         KI-Korrektur (Weißabgleich + Kurven)
+  greenscreen.py  KI-Hintergrundentfernung (Green-/Bluescreen → Transparenz)
   fileio.py       Laden (JPEG/PNG/RAW) und Export (JPEG/PNG)
   store.py        Speicherung der Bearbeitungen, Portabel-Modus
   widgets.py      Kurveneditor, Histogramm, Slider, Bildansicht

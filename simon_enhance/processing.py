@@ -44,6 +44,17 @@ class Params:
     blacks: float = 0.0
     vibrance: float = 0.0
     saturation: float = 0.0
+    # background removal (green / blue screen) - see greenscreen.py
+    key_enabled: float = 0.0     # 0 / 1
+    key_channel: float = 1.0     # 1 = green, 2 = blue
+    key_level: float = 0.0       # measured key excess of the backdrop (0 = not analysed)
+    key_r: float = 0.0           # backdrop colour (sRGB 0..1)
+    key_g: float = 0.0
+    key_b: float = 0.0
+    key_tolerance: float = 50.0  # 0..100
+    key_softness: float = 50.0   # 0..100
+    key_despill: float = 80.0    # 0..100
+    key_edge: float = 25.0       # -100 (grow) .. 100 (shrink the matte)
     curves: dict = field(default_factory=lambda: {c: identity_curve() for c in CHANNELS})
 
     def copy(self) -> "Params":
@@ -66,6 +77,16 @@ class Params:
 
     def is_default(self) -> bool:
         return self == Params()
+
+    def key_rgb_list(self) -> list[float]:
+        return [self.key_r, self.key_g, self.key_b]
+
+    def without_key(self) -> "Params":
+        p = self.copy()
+        for k, v in Params().to_dict().items():
+            if k.startswith("key_"):
+                setattr(p, k, v)
+        return p
 
 
 # ---------------------------------------------------------------------------
@@ -280,6 +301,40 @@ class Renderer:
         for y in range(0, linear.shape[0], rows):
             out[y:y + rows] = self.apply(linear[y:y + rows].astype(np.float32, copy=True))
         return out
+
+    # -- with background removal -------------------------------------------
+    def _keyer(self, height: int):
+        from .greenscreen import KeyMatte, has_key
+        return KeyMatte(self.params, height) if has_key(self.params) else None
+
+    def apply_rgba(self, linear: np.ndarray, alpha: np.ndarray | None = None):
+        """Returns (sRGB, alpha or None). Alpha combines the source alpha and the key."""
+        keyer = self._keyer(linear.shape[0])
+        if keyer is None:
+            return self.apply(linear.astype(np.float32, copy=True)), alpha
+        clean, matte = keyer.apply(linear)
+        if alpha is not None:
+            matte = matte * alpha
+        return self.apply(clean), matte
+
+    def apply_tiled_rgba(self, linear: np.ndarray, alpha: np.ndarray | None = None,
+                         rows: int = 512):
+        keyer = self._keyer(linear.shape[0])
+        if keyer is None:
+            return self.apply_tiled(linear, rows), alpha
+        h = linear.shape[0]
+        out = np.empty(linear.shape, dtype=np.float32)
+        matte = np.empty(linear.shape[:2], dtype=np.float32)
+        pad = keyer.pad
+        for y in range(0, h, rows):
+            y0, y1 = max(0, y - pad), min(h, y + rows + pad)
+            clean, m = keyer.apply(linear[y0:y1].astype(np.float32, copy=True))
+            a, b = y - y0, y - y0 + min(rows, h - y)
+            out[y:y + rows] = self.apply(clean[a:b])
+            matte[y:y + rows] = m[a:b]
+        if alpha is not None:
+            matte *= alpha
+        return out, matte
 
 
 def render(linear: np.ndarray, params: Params) -> np.ndarray:

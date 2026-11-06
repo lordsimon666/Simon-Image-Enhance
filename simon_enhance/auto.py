@@ -30,6 +30,14 @@ def _downsample(img: np.ndarray, max_side: int = 384) -> np.ndarray:
     return img[::step, ::step, :3].astype(np.float32)
 
 
+def _downsample_mask(mask, max_side: int):
+    if mask is None:
+        return None
+    h, w = mask.shape[:2]
+    step = max(1, int(math.ceil(max(h, w) / max_side)))
+    return mask[::step, ::step]
+
+
 def _chroma(v: np.ndarray) -> np.ndarray:
     v = np.maximum(np.asarray(v, dtype=np.float64), 1e-6)
     return np.log(v / v[..., 1:2])  # log(r/g), 0, log(b/g)
@@ -147,18 +155,21 @@ def _grey_pixel_estimate(pix_chroma, lv):
     return chroma, confidence
 
 
-def estimate_illuminant(linear: np.ndarray) -> np.ndarray:
+def estimate_illuminant(linear: np.ndarray, mask=None) -> np.ndarray:
     """Return the estimated scene illuminant as linear RGB (G normalised to 1)."""
-    return estimate_illuminant_conf(linear)[0]
+    return estimate_illuminant_conf(linear, mask)[0]
 
 
-def estimate_illuminant_conf(linear: np.ndarray) -> tuple[np.ndarray, float]:
+def estimate_illuminant_conf(linear: np.ndarray, mask=None) -> tuple[np.ndarray, float]:
     """Estimated illuminant plus a confidence 0..1 (how many reliable grey
     surfaces supported the estimate)."""
     img = _downsample(linear, 256)
     px = img.reshape(-1, 3).astype(np.float64)
     lum = px @ LUM_WEIGHTS
     valid = (px.max(axis=1) < 0.97) & (lum > 0.01)
+    m = _downsample_mask(mask, 256)
+    if m is not None and m.sum() > 200:  # only analyse the foreground (key removed)
+        valid &= m.reshape(-1)
     if valid.sum() < 50:
         valid = lum > 0
     if valid.sum() < 10:
@@ -190,8 +201,8 @@ def estimate_illuminant_conf(linear: np.ndarray) -> tuple[np.ndarray, float]:
     return np.exp(wg * grey + (1 - wg) * stat), conf
 
 
-def auto_white_balance(linear: np.ndarray) -> tuple[float, float]:
-    illum, conf = estimate_illuminant_conf(linear)
+def auto_white_balance(linear: np.ndarray, mask=None) -> tuple[float, float]:
+    illum, conf = estimate_illuminant_conf(linear, mask)
     temp, tint = solve_white_balance(illum)
     # The camera already applied its own white balance ("as shot"). With little
     # evidence (few reliable grey surfaces, mixed light) we only move part of the
@@ -206,8 +217,10 @@ def auto_white_balance(linear: np.ndarray) -> tuple[float, float]:
     shift = mired - mired_ref
     keep = 0.12 if abs(shift) > 60 else 0.0
     temp = 1e6 / (mired_ref + shift * (1 - keep))
-    # real light sources rarely deviate far from the Planckian locus -> limit tint
-    return float(temp), float(np.clip(tint * 0.9, -80.0, 80.0))
+    # real light sources rarely deviate far from the Planckian locus -> limit tint;
+    # without grey surfaces as evidence the statistics are least reliable for tint
+    limit = 10.0 + 70.0 * conf
+    return float(temp), float(np.clip(tint * 0.9, -limit, limit))
 
 
 def _blend_points(points, strength: float):
@@ -217,12 +230,15 @@ def _blend_points(points, strength: float):
             for i, (x, y) in enumerate(points)]
 
 
-def auto_curves(linear: np.ndarray, params: Params) -> dict:
+def auto_curves(linear: np.ndarray, params: Params, mask=None) -> dict:
     """Derive master + per-channel curves for an image rendered with ``params``."""
     base = params.copy()
     base.curves = {c: identity_curve() for c in base.curves}
     img = Renderer(base).apply(_downsample(linear, 512).copy())
     px = img.reshape(-1, 3)
+    m = _downsample_mask(mask, 512)
+    if m is not None and m.sum() > 500:
+        px = px[m.reshape(-1)]
     lum = px @ LUM_WEIGHTS
 
     bp = float(np.clip(np.quantile(lum, 0.003), 0.0, 0.06))
@@ -284,11 +300,19 @@ def ai_correct(linear: np.ndarray, params: Params, strength: float = 1.0) -> Par
     """Return a copy of ``params`` with AI white balance and curves applied."""
     strength = float(np.clip(strength, 0.0, 1.0))
     out = params.copy()
-    temp, tint = auto_white_balance(linear)
+    mask = None
+    from .greenscreen import KeyMatte, has_key
+    if has_key(params):
+        # with a removed backdrop only the subject counts (the green screen would
+        # otherwise dominate the statistics)
+        linear = _downsample(linear, 768)
+        linear, alpha = KeyMatte(params, linear.shape[0]).apply(linear)
+        mask = alpha > 0.5
+    temp, tint = auto_white_balance(linear, mask)
     mired_ref = 1e6 / NEUTRAL_TEMP
     out.temp = 1e6 / (mired_ref + (1e6 / temp - mired_ref) * strength)
     out.tint = tint * strength
-    curves = auto_curves(linear, out)
+    curves = auto_curves(linear, out, mask)
     if strength < 1.0:
         curves = {c: _blend_points(p, strength) for c, p in curves.items()}
     out.curves = curves

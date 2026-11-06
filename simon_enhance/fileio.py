@@ -228,6 +228,7 @@ class ExportOptions:
     png_bits: int = 8          # 8 | 16
     long_edge: int | None = None
     keep_exif: bool = True
+    jpeg_background: tuple = (1.0, 1.0, 1.0)  # used for transparent areas in JPEGs
 
 
 def export_image(src_path: str, params: Params, dst_path: str, opts: ExportOptions) -> str:
@@ -238,7 +239,7 @@ def export_image(src_path: str, params: Params, dst_path: str, opts: ExportOptio
         lin = _resize_float(lin, opts.long_edge)
         if alpha is not None:
             alpha = _resize_float(alpha[..., None], opts.long_edge)[..., 0]
-    out = Renderer(params).apply_tiled(lin)
+    out, alpha = Renderer(params).apply_tiled_rgba(lin, alpha)
     del lin
 
     os.makedirs(os.path.dirname(os.path.abspath(dst_path)) or ".", exist_ok=True)
@@ -257,6 +258,9 @@ def export_image(src_path: str, params: Params, dst_path: str, opts: ExportOptio
                 im.putalpha(Image.fromarray(to_uint8(alpha), "L"))
             im.save(dst_path, "PNG", optimize=False, compress_level=6, icc_profile=srgb_icc)
     else:
+        if alpha is not None:  # JPEG has no transparency -> place on the chosen background
+            bg = np.array(opts.jpeg_background, np.float32)
+            out = out * alpha[..., None] + bg * (1.0 - alpha[..., None])
         im = Image.fromarray(to_uint8(out), "RGB")
         kw = dict(quality=int(opts.quality), subsampling=0 if opts.quality >= 90 else 2,
                   optimize=True, icc_profile=srgb_icc)

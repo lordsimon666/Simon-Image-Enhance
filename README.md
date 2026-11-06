@@ -15,9 +15,9 @@ gespeichert und erst beim Export angewendet.
 | **KI-Korrektur** | Analysiert das Bild und setzt **nur Weißabgleich und Gradationskurven** automatisch. Stärke einstellbar, danach alles feinjustierbar. Auch für mehrere Bilder auf einmal. |
 | **Hintergrund entfernen (KI)** | Erkennt Green- und Bluescreens automatisch und macht sie transparent – auch bei Falten, Schatten und ungleichmäßiger Ausleuchtung. Regler für Toleranz, Weichheit, Kante und Entfärben (entfernt grüne Reflexe). PNG-Export speichert die Transparenz (8 und 16 Bit), JPEG bekommt eine wählbare Hintergrundfarbe. |
 | **Tonwert / Präsenz** | Belichtung, Kontrast, Lichter, Tiefen, Weiß, Schwarz, Dynamik, Sättigung |
-| **Import** | JPEG, PNG (8/16 Bit, Transparenz), TIFF, WebP und **RAW** (DNG, CR2, CR3, NEF, ARW, RAF, ORF, RW2, PEF, SRW … über LibRaw) |
+| **Import** | JPEG, PNG (mit Transparenz; 16-Bit-PNGs werden derzeit mit 8 Bit gelesen), TIFF, WebP, Fotos bis 1 Gigapixel (z. B. 200-MP-Handykameras) und **RAW** (DNG, CR2, CR3, NEF, ARW, RAF, ORF, RW2, PEF, SRW … über LibRaw) |
 | **Export** | JPEG (Qualität, EXIF) und PNG (8/16 Bit), Größe begrenzen, Stapel-Export |
-| **Workflow** | Filmstreifen (Ordner öffnen), Vorher/Nachher (`\`), Rückgängig/Wiederholen, Einstellungen kopieren & auf mehrere Bilder einfügen, Drag & Drop, Histogramm |
+| **Workflow** | Filmstreifen (Ordner öffnen, Bilder hinzufügen und schließen), Vorher/Nachher (`\`), Rückgängig/Wiederholen, Einstellungen kopieren & auf mehrere Bilder einfügen, Drag & Drop, Histogramm |
 
 ### Wie die KI-Korrektur arbeitet
 
@@ -77,6 +77,7 @@ git push origin v1.0.0
 | Taste | Aktion |
 |---|---|
 | `Strg+O` / `Strg+Shift+O` | Bilder / Ordner öffnen |
+| `Strg+W` / `Strg+Shift+W` | Bild schließen / alle schließen (Rechtsklick im Filmstreifen: weitere Optionen) |
 | `Strg+E` / `Strg+Shift+E` | Exportieren / Auswahl exportieren |
 | `Strg+U` / `Strg+Shift+U` | KI-Korrektur / auf Auswahl anwenden |
 | `Strg+G` | Greenscreen entfernen (KI) |

@@ -328,23 +328,37 @@ class Renderer:
             matte = matte * alpha
         return self.apply(clean), matte
 
-    def apply_tiled_rgba(self, linear: np.ndarray, alpha: np.ndarray | None = None,
-                         rows: int = 512):
-        keyer = self._keyer(linear.shape[0])
-        if keyer is None:
-            return self.apply_tiled(linear, rows), alpha
+    def iter_strips(self, linear, alpha=None, rows: int = 256):
+        """Render in horizontal strips. ``linear`` / ``alpha`` may be arrays or lazy
+        sources (anything with ``.shape`` and row slicing that returns float32 arrays),
+        so huge photos never need a full float copy in memory.
+        Yields (y, sRGB strip, alpha strip or None)."""
         h = linear.shape[0]
-        out = np.empty(linear.shape, dtype=np.float32)
-        matte = np.empty(linear.shape[:2], dtype=np.float32)
-        pad = keyer.pad
+        keyer = self._keyer(h)
+        pad = keyer.pad if keyer is not None else 0
         for y in range(0, h, rows):
             y0, y1 = max(0, y - pad), min(h, y + rows + pad)
-            clean, m = keyer.apply(linear[y0:y1].astype(np.float32, copy=True))
+            strip = np.asarray(linear[y0:y1], dtype=np.float32).copy()
             a, b = y - y0, y - y0 + min(rows, h - y)
-            out[y:y + rows] = self.apply(clean[a:b])
-            matte[y:y + rows] = m[a:b]
-        if alpha is not None:
-            matte *= alpha
+            src_a = None if alpha is None else np.asarray(alpha[y:y + rows], dtype=np.float32)
+            if keyer is None:
+                yield y, self.apply(strip[a:b]), src_a
+                continue
+            clean, m = keyer.apply(strip)
+            m = m[a:b]
+            if src_a is not None:
+                m = m * src_a
+            yield y, self.apply(clean[a:b]), m
+
+    def apply_tiled_rgba(self, linear, alpha=None, rows: int = 512):
+        h, w = linear.shape[:2]
+        out = np.empty((h, w, 3), dtype=np.float32)
+        keyed = self._keyer(h) is not None
+        matte = np.empty((h, w), dtype=np.float32) if (keyed or alpha is not None) else None
+        for y, rgb, m in self.iter_strips(linear, alpha, rows):
+            out[y:y + len(rgb)] = rgb
+            if matte is not None:
+                matte[y:y + len(rgb)] = m
         return out, matte
 
 

@@ -81,19 +81,26 @@ def detect_key(linear: np.ndarray) -> dict | None:
 # guided filter (He et al.) - box filters via integral images
 # ---------------------------------------------------------------------------
 
+def _box_axis(x: np.ndarray, r: int, axis: int) -> np.ndarray:
+    """Windowed mean along one axis (window 2r+1, shortened and renormalised at the
+    borders). Sums run in float64 - float32 loses precision on large photos."""
+    n = x.shape[axis]
+    c = np.cumsum(x, axis=axis, dtype=np.float64)
+    shape = list(c.shape)
+    shape[axis] = 1
+    c = np.concatenate([np.zeros(shape), c], axis=axis)
+    hi = np.minimum(np.arange(n) + r + 1, n)
+    lo = np.maximum(np.arange(n) - r, 0)
+    s = np.take(c, hi, axis=axis) - np.take(c, lo, axis=axis)
+    cnt = (hi - lo).astype(np.float64)
+    cnt = cnt[:, None] if axis == 0 else cnt[None, :]
+    return s / cnt
+
+
 def _box(x: np.ndarray, r: int) -> np.ndarray:
-    """Mean over a (2r+1)^2 window, edges handled by normalising with the count."""
-    h, w = x.shape
-    c = np.zeros((h + 1, w + 1), np.float64)
-    # accumulate in float64 - float32 integral images lose precision on large photos
-    c[1:, 1:] = np.cumsum(np.cumsum(x, axis=0, dtype=np.float64), axis=1)
-    y0 = np.clip(np.arange(h) - r, 0, h)
-    y1 = np.clip(np.arange(h) + r + 1, 0, h)
-    x0 = np.clip(np.arange(w) - r, 0, w)
-    x1 = np.clip(np.arange(w) + r + 1, 0, w)
-    s = c[y1][:, x1] - c[y0][:, x1] - c[y1][:, x0] + c[y0][:, x0]
-    n = (y1 - y0)[:, None] * (x1 - x0)[None, :]
-    return (s / n).astype(np.float32)
+    """Mean over a (2r+1)^2 window, edges handled by normalising with the count.
+    Separable: rows, then columns."""
+    return _box_axis(_box_axis(x, r, 0), r, 1).astype(np.float32)
 
 
 def guided_filter(guide: np.ndarray, src: np.ndarray, r: int, eps: float) -> np.ndarray:
@@ -129,7 +136,8 @@ class KeyMatte:
         # darkest plausible backdrop (deep folds/shadows) ~ 45 % of its typical brightness
         self.floor = max(0.05, 0.45 * float(key_srgb[self.k]))
         # refinement radius scales with the resolution (preview vs. full export)
-        self.radius = max(1, int(round(full_height / 900)))
+        # (capped: very large photos would otherwise need huge filter windows)
+        self.radius = max(1, min(4, int(round(full_height / 900))))
         # neighbourhood used to measure the local backdrop colour next to edges
         self.bg_radius = self.radius * 6
         self.speck_radius = self.radius * 2 + 1

@@ -12,7 +12,7 @@ from PySide6.QtGui import QAction, QIcon, QKeySequence, QPalette, QColor, QPixma
 from PySide6.QtWidgets import (
     QApplication, QButtonGroup, QCheckBox, QComboBox, QDialog, QDialogButtonBox, QFileDialog,
     QFormLayout, QFrame, QGroupBox, QHBoxLayout, QLabel, QLineEdit, QListWidget,
-    QListWidgetItem, QMainWindow, QMessageBox, QProgressDialog, QPushButton, QScrollArea,
+    QListWidgetItem, QMainWindow, QMenu, QMessageBox, QProgressDialog, QPushButton, QScrollArea,
     QSpinBox, QSplitter, QStatusBar, QToolButton, QVBoxLayout, QWidget,
 )
 
@@ -233,6 +233,8 @@ class MainWindow(QMainWindow):
         self.film.setSelectionMode(QListWidget.ExtendedSelection)
         self.film.setHorizontalScrollBarPolicy(Qt.ScrollBarAlwaysOn)
         self.film.currentItemChanged.connect(self._on_film_select)
+        self.film.setContextMenuPolicy(Qt.CustomContextMenu)
+        self.film.customContextMenuRequested.connect(self._film_menu)
 
         center = QWidget()
         cl = QVBoxLayout(center)
@@ -423,6 +425,10 @@ class MainWindow(QMainWindow):
         act(f, "Bilder öffnen…", self.open_files_dialog, "Ctrl+O")
         act(f, "Ordner öffnen…", self.open_folder_dialog, "Ctrl+Shift+O")
         f.addSeparator()
+        self.a_close = act(f, "Bild schließen", self.close_current, "Ctrl+W")
+        self.a_close_sel = act(f, "Ausgewählte Bilder schließen", self.close_selected)
+        self.a_close_all = act(f, "Alle Bilder schließen", self.close_all, "Ctrl+Shift+W")
+        f.addSeparator()
         self.a_export = act(f, "Exportieren…", self.export_current, "Ctrl+E")
         self.a_export_sel = act(f, "Auswahl exportieren…", self.export_selected, "Ctrl+Shift+E")
         f.addSeparator()
@@ -454,8 +460,11 @@ class MainWindow(QMainWindow):
 
     def _set_enabled(self, on: bool):
         self.panel.setEnabled(on)
-        for a in (self.a_export,):
+        for a in (self.a_export, self.a_close):
             a.setEnabled(on)
+        has_items = self.film.count() > 0
+        for a in (self.a_export_sel, self.a_close_sel, self.a_close_all):
+            a.setEnabled(has_items)
 
     # ------------------------------------------------------------- opening
     def open_files_dialog(self):
@@ -489,20 +498,109 @@ class MainWindow(QMainWindow):
             return
         self.settings.set("last_dir", os.path.dirname(files[0]))
         self._save_current()
-        self.film.blockSignals(True)
-        self.film.clear()
+        # add to the filmstrip (already open images are not added twice)
+        open_now = {os.path.abspath(self.film.item(i).data(Qt.UserRole)) for i in range(self.film.count())}
+        first = None
         placeholder = QPixmap(120, 90)
         placeholder.fill(QColor(50, 50, 50))
+        self.film.blockSignals(True)
         for fp in files:
+            if os.path.abspath(fp) in open_now:
+                first = first or self._item_for(fp)
+                continue
+            open_now.add(os.path.abspath(fp))
             it = QListWidgetItem(QIcon(placeholder), os.path.basename(fp))
             it.setData(Qt.UserRole, fp)
             it.setToolTip(fp)
             it.setSizeHint(QSize(132, 118))
             self.film.addItem(it)
+            first = first or it
+            self._run(("thumb", fp), self._thumb_job, fp, pool=self.thumb_pool)
         self.film.blockSignals(False)
-        for i, fp in enumerate(files):
-            self._run(("thumb", i, fp), self._thumb_job, fp, pool=self.thumb_pool)
-        self.film.setCurrentRow(0)
+        self._set_enabled(self.image is not None)
+        if first is not None:
+            self.film.clearSelection()  # only the newly shown image is selected
+            self.film.setCurrentItem(first)
+            first.setSelected(True)
+            self.film.scrollToItem(first)
+
+    def _item_for(self, path):
+        for i in range(self.film.count()):
+            if self.film.item(i).data(Qt.UserRole) == path:
+                return self.film.item(i)
+        return None
+
+    # ------------------------------------------------------------- closing
+    def close_current(self):
+        if self.image is not None:
+            it = self._item_for(self.image.path)
+            if it is not None:
+                self._close_items([it])
+
+    def close_selected(self):
+        items = self.film.selectedItems()
+        if not items and self.image is not None:
+            items = [self._item_for(self.image.path)]
+        self._close_items([i for i in items if i is not None])
+
+    def close_all(self):
+        self._close_items([self.film.item(i) for i in range(self.film.count())])
+
+    def _close_items(self, items):
+        """Remove images from the filmstrip. Edits stay saved and come back when the
+        image is opened again; the files themselves are never touched."""
+        if not items:
+            return
+        self.commit_timer.stop()
+        self._commit()
+        self._save_current()
+        closing = {it.data(Qt.UserRole) for it in items}
+        current = self.image.path if self.image is not None else self.current_path
+        cur_row = self.film.currentRow()
+        self.film.blockSignals(True)
+        for it in items:
+            self.film.takeItem(self.film.row(it))
+        self.film.blockSignals(False)
+        if current in closing or current is None:
+            self._clear_view()
+            if self.film.count():
+                self.film.blockSignals(True)
+                self.film.setCurrentRow(min(max(cur_row, 0), self.film.count() - 1))
+                self.film.blockSignals(False)
+                # load explicitly: Qt may already have moved the current row silently
+                self._on_film_select(self.film.currentItem(), None)
+        n = len(closing)
+        self._set_enabled(self.image is not None)
+        self.statusBar().showMessage(f"{n} Bild{'er' if n != 1 else ''} geschlossen", 3000)
+
+    def _clear_view(self):
+        self.load_token += 1  # ignore loads still running in the background
+        QApplication.restoreOverrideCursor()
+        self.image = None
+        self.current_path = None
+        self.params = Params()
+        self.history, self.hist_pos = [], -1
+        self.show_before = False
+        self.view.set_overlay("")
+        self.view.set_image(None)
+        self.histogram.set_image(None)
+        self.curve.set_histogram(None)
+        self.info.setText("")
+        self.setWindowTitle(APP_TITLE)
+        self._apply_params_to_ui(Params())
+        self._set_enabled(False)
+
+    def _film_menu(self, pos):
+        it = self.film.itemAt(pos)
+        menu = QMenu(self)
+        if it is not None:
+            menu.addAction("Schließen", lambda: self._close_items([it]))
+        if len(self.film.selectedItems()) > 1:
+            menu.addAction(f"{len(self.film.selectedItems())} ausgewählte schließen", self.close_selected)
+        if self.film.count():
+            menu.addAction("Alle schließen", self.close_all)
+        if not menu.isEmpty():
+            menu.exec(self.film.mapToGlobal(pos))
 
     def _thumb_job(self, fp):
         arr = load_thumbnail(fp, 180)
@@ -527,9 +625,9 @@ class MainWindow(QMainWindow):
         self._tasks.discard(self.sender())
         kind = tag[0]
         if kind == "thumb":
-            _, i, fp = tag
-            it = self.film.item(i)
-            if it is not None and it.data(Qt.UserRole) == fp:
+            _, fp = tag
+            it = self._item_for(fp)
+            if it is not None:
                 pm = QPixmap.fromImage(array_to_qimage(res))
                 icon = QIcon(pm)
                 icon.addPixmap(pm, QIcon.Selected)  # no blue tint on selected thumbnails
@@ -630,10 +728,8 @@ class MainWindow(QMainWindow):
                 self.statusBar().showMessage(f"Speichern fehlgeschlagen: {exc}")
 
     def _refresh_thumb(self, path):
-        for i in range(self.film.count()):
-            if self.film.item(i).data(Qt.UserRole) == path:
-                self._run(("thumb", i, path), self._thumb_job, path, pool=self.thumb_pool)
-                break
+        if self._item_for(path) is not None:
+            self._run(("thumb", path), self._thumb_job, path, pool=self.thumb_pool)
 
     def undo(self):
         self.commit_timer.stop()
@@ -857,7 +953,7 @@ class MainWindow(QMainWindow):
                 n += 1
             jobs.append((fp, params.copy(), dst))
 
-        prog = QProgressDialog("Exportiere …", "Abbrechen", 0, len(jobs), self)
+        prog = QProgressDialog("Exportiere …", "Abbrechen", 0, len(jobs) * 100, self)
         prog.setWindowModality(Qt.WindowModal)
         prog.setMinimumDuration(0)
         prog.setValue(0)
@@ -866,7 +962,7 @@ class MainWindow(QMainWindow):
         def next_job():
             i = state["i"]
             if i >= len(jobs) or prog.wasCanceled():
-                prog.setValue(len(jobs))
+                prog.setValue(len(jobs) * 100)
                 errs = state["errors"]
                 done = i - len(errs)
                 msg = f"{done} Bild(er) exportiert."
@@ -877,12 +973,15 @@ class MainWindow(QMainWindow):
                     self.statusBar().showMessage(msg, 5000)
                 return
             fp, params, dst = jobs[i]
-            prog.setLabelText(f"Exportiere {os.path.basename(fp)} …")
+            prog.setLabelText(f"Exportiere {os.path.basename(fp)} ({i + 1}/{len(jobs)}) …")
             t = Task(("export", i), export_image, fp, params, dst, opts)
+            sig = t.signals
+            t.args = (*t.args, lambda f, sig=sig: sig.progress.emit(int(f * 100), ""))
+            sig.progress.connect(lambda v, _txt, i=i: prog.setValue(i * 100 + min(v, 99)))
 
             def ok(tag, res):
                 state["i"] += 1
-                prog.setValue(state["i"])
+                prog.setValue(state["i"] * 100)
                 next_job()
 
             def fail(tag, msg):

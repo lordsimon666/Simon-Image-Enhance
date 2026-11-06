@@ -95,7 +95,7 @@ echten Grafikkarten läuft, zeigt `--ai-info` bzw. die Statusleiste (sonst rechn
 Erkennt die App beim Start einen **NVIDIA-Treiber (CUDA)** oder **AMD ROCm**, fragt sie einmalig,
 ob die herstellerspezifische Laufzeit nachgeladen werden soll – meist deutlich schneller als
 Vulkan und mit Tensor- bzw. Matrix-Kernen. Später jederzeit über
-*Einstellungen → GPU-Laufzeiten (CUDA / ROCm)* nachholen oder wieder entfernen.
+*Einstellungen → GPU-Laufzeiten und Treiber* nachholen oder wieder entfernen.
 
 | Laufzeit | Download | Voraussetzung auf dem System |
 |---|---|---|
@@ -108,6 +108,18 @@ Die Pakete kommen offiziell von PyPI (ONNX Runtime von Microsoft, CUDA-Bibliothe
 werden per SHA-256 geprüft und im Datenordner unter `runtimes` abgelegt. Der Grafiktreiber
 selbst kommt immer vom System. Lässt sich die nachgeladene Laufzeit nicht starten, nutzt die
 App automatisch wieder die mitgelieferte (Vulkan). `SIE_GPU_RUNTIME=0` schaltet sie ab.
+
+### Fehlende Treiber: Installationsanleitung für das eigene System
+
+Findet die App eine Grafikkarte oder NPU, deren Treiber fehlt (z. B. NVIDIA-Karte mit dem freien
+„nouveau“-Treiber, kein Vulkan-Treiber, fehlendes ROCm, fehlender Intel-NPU-Treiber), bietet sie
+einmalig eine **Installationsanleitung für das erkannte Betriebssystem** an – mit Befehlen zum
+Kopieren. Jederzeit erreichbar unter *Einstellungen → GPU-Laufzeiten und Treiber*.
+
+Berücksichtigte Systeme: **Bazzite** und andere Universal-Blue-Images (Bluefin, Aurora – dort per
+Wechsel auf das passende NVIDIA-Image mit `rpm-ostree rebase`), Fedora Atomic (Silverblue, Kinoite),
+Fedora, Ubuntu, Linux Mint, Pop!_OS, Debian, Arch, Manjaro, CachyOS, openSUSE; für andere
+Systeme allgemeine Hinweise mit Links. Läuft die App als Flatpak, wird das Wirtssystem erkannt.
 
 Weitere Hinweise:
 - **AMD-NPUs** (Ryzen AI / XDNA) werden nicht unterstützt.
@@ -254,6 +266,7 @@ simon_enhance/
   ai/models.py    Modellregister, Download mit Prüfsumme
   ai/features.py  Hintergrund-KI, Entrauschen, Hochskalieren
   runtimes.py     optionale CUDA-/ROCm-Laufzeiten: Erkennung, Download, Aktivierung
+  drivers.py      fehlende Treiber erkennen, Installationsanleitungen je Betriebssystem
   fileio.py       Laden (JPEG/PNG/RAW) und Export (JPEG/PNG)
   store.py        Speicherung der Bearbeitungen, Portabel-Modus
   widgets.py      Kurveneditor, Histogramm, Slider, Bildansicht

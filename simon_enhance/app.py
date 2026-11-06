@@ -513,7 +513,7 @@ class MainWindow(QMainWindow):
         self.a_gpu.toggled.connect(self._on_gpu_toggled)
         opt.addAction(self.a_gpu)
         gpu.set_enabled(self.a_gpu.isChecked())
-        a_rt = QAction("GPU-Laufzeiten (CUDA / ROCm) …", self)
+        a_rt = QAction("GPU-Laufzeiten und Treiber …", self)
         a_rt.setStatusTip("Herstellerspezifische GPU-Unterstützung für NVIDIA (CUDA) und AMD (ROCm) nachladen")
         a_rt.triggered.connect(self.gpu_runtime_dialog)
         opt.addAction(a_rt)
@@ -998,6 +998,11 @@ class MainWindow(QMainWindow):
 
         def job(progress, cancelled):
             res = []
+            try:
+                from . import drivers
+                self._driver_issues = (drivers.find_issues(), drivers.read_os())
+            except Exception:  # noqa: BLE001
+                self._driver_issues = ([], None)
             for o in runtimes.detect():
                 items = None
                 if o.possible and o.profile.id not in runtimes.installed():
@@ -1018,6 +1023,8 @@ class MainWindow(QMainWindow):
     def _offer_gpu_runtimes(self, results):
         from . import runtimes
         installed = runtimes.installed()
+        if self._offer_driver_guides():
+            return  # one message per start
         for offer, items in results:
             vendor = offer.profile.vendor
             key = f"gpu_runtime_asked_{vendor}"
@@ -1026,7 +1033,7 @@ class MainWindow(QMainWindow):
             self.settings.set(key, True)  # ask only once - the settings menu remains
             name = "NVIDIA-CUDA" if vendor == "nvidia" else "AMD-ROCm"
             later = ("\n\nWenn Sie das jetzt nicht tun, können Sie es jederzeit unter "
-                     "Einstellungen → GPU-Laufzeiten (CUDA / ROCm) nachholen.")
+                     "Einstellungen → GPU-Laufzeiten und Treiber nachholen.")
             gpus = f" ({', '.join(offer.gpus)})" if offer.gpus else ""
             if not offer.possible:
                 QMessageBox.information(
@@ -1049,6 +1056,83 @@ class MainWindow(QMainWindow):
             if box.clickedButton() is yes:
                 self._install_gpu_runtime(offer)
             return  # one question per start
+
+    def _offer_driver_guides(self) -> bool:
+        """A compatible GPU/NPU without driver: offer an installation guide (once per issue)."""
+        issues, osi = getattr(self, "_driver_issues", ([], None))
+        for issue in issues:
+            if issue.optional:
+                continue  # optional extras only appear in the settings dialog
+            key = f"driver_guide_asked_{issue.id}"
+            if self.settings.get(key):
+                continue
+            self.settings.set(key, True)
+            box = QMessageBox(self)
+            box.setWindowTitle("Treiber fehlt")
+            box.setIcon(QMessageBox.Information)
+            box.setText(issue.message)
+            box.setInformativeText(
+                f"{issue.benefit}\n\nMöchten Sie eine Installationsanleitung für "
+                f"{osi.name if osi else 'Ihr System'} anzeigen?\n\nSie finden die Anleitung auch jederzeit "
+                "unter Einstellungen → GPU-Laufzeiten und Treiber.")
+            show = box.addButton("Anleitung anzeigen", QMessageBox.AcceptRole)
+            box.addButton("Nicht jetzt", QMessageBox.RejectRole)
+            box.exec()
+            if box.clickedButton() is show:
+                self.show_driver_guide(issue, osi)
+            return True
+        return False
+
+    def show_driver_guide(self, issue, osi=None):
+        from PySide6.QtGui import QDesktopServices, QGuiApplication
+        from PySide6.QtCore import QUrl
+        from . import drivers
+        osi = osi or drivers.read_os()
+        g = drivers.guide(issue, osi)
+        dlg = QDialog(self)
+        dlg.setWindowTitle(f"Installationsanleitung – {g.title}")
+        lay = QVBoxLayout(dlg)
+        head = QLabel(f"<b>{g.title}</b><br><span style='color:#999'>Erkanntes System: {g.os_label}</span>")
+        head.setWordWrap(True)
+        lay.addWidget(head)
+        intro = QLabel(g.intro.replace("\n", "<br>"))
+        intro.setWordWrap(True)
+        lay.addWidget(intro)
+        mono = QApplication.font()
+        mono.setFamily("monospace")
+        for i, st in enumerate(g.steps, 1):
+            t = QLabel(f"<b>{i}.</b> {st.text}")
+            t.setWordWrap(True)
+            lay.addWidget(t)
+            if st.command:
+                row = QHBoxLayout()
+                cmd = QLineEdit(st.command)
+                cmd.setReadOnly(True)
+                cmd.setFont(mono)
+                cmd.setCursorPosition(0)
+                cp = QPushButton("Kopieren")
+                cp.clicked.connect(lambda _=False, c=st.command: (QGuiApplication.clipboard().setText(c),
+                                                                  self.statusBar().showMessage("Befehl kopiert", 2000)))
+                row.addWidget(cmd, 1)
+                row.addWidget(cp)
+                lay.addLayout(row)
+        for n in g.notes:
+            lbl = QLabel(f"ℹ️ {n}")
+            lbl.setWordWrap(True)
+            lbl.setStyleSheet("color:#bbb")
+            lay.addWidget(lbl)
+        if g.links:
+            links = QLabel(" · ".join(f"<a href='{u}' style='color:#6aa0ff'>{t}</a>" for t, u in g.links))
+            links.setOpenExternalLinks(False)
+            links.linkActivated.connect(lambda u: QDesktopServices.openUrl(QUrl(u)))
+            lay.addWidget(links)
+        bb = QDialogButtonBox()
+        bb.addButton("Schließen", QDialogButtonBox.RejectRole)
+        bb.rejected.connect(dlg.reject)
+        lay.addWidget(bb)
+        dlg.setMinimumWidth(720)
+        dlg.adjustSize()
+        dlg.exec()
 
     def _install_gpu_runtime(self, offer):
         from . import runtimes
@@ -1080,7 +1164,7 @@ class MainWindow(QMainWindow):
     def gpu_runtime_dialog(self):
         from . import runtimes
         dlg = QDialog(self)
-        dlg.setWindowTitle("GPU-Laufzeiten (CUDA / ROCm)")
+        dlg.setWindowTitle("GPU-Laufzeiten und Treiber")
         lay = QVBoxLayout(dlg)
         intro = QLabel("Die App nutzt jede Grafikkarte über Vulkan und die Intel-NPU über OpenVINO. "
                        "Für NVIDIA- und AMD-Karten gibt es zusätzlich herstellerspezifische Laufzeiten "
@@ -1097,6 +1181,25 @@ class MainWindow(QMainWindow):
         finally:
             QApplication.restoreOverrideCursor()
         installed = runtimes.installed()
+        from . import drivers
+        try:
+            issues, osi = drivers.find_issues(), drivers.read_os()
+        except Exception:  # noqa: BLE001
+            issues, osi = [], None
+        if issues:
+            hdr = QLabel("<b>Fehlende Treiber</b>" + (f" <span style='color:#999'>– {osi.name}</span>" if osi else ""))
+            lay.addWidget(hdr)
+        for issue in issues:
+            row = QHBoxLayout()
+            lbl = QLabel(f"{issue.title}<br><span style='color:#999'>{issue.message}</span>")
+            lbl.setWordWrap(True)
+            row.addWidget(lbl, 1)
+            b = QPushButton("Anleitung anzeigen")
+            b.clicked.connect(lambda _=False, i=issue: self.show_driver_guide(i, osi))
+            row.addWidget(b)
+            lay.addLayout(row)
+        if issues:
+            lay.addWidget(QLabel("<b>GPU-Laufzeiten</b>"))
         if not offers and not installed:
             lay.addWidget(QLabel("Keine NVIDIA-CUDA- oder AMD-ROCm-Treiber gefunden."))
         for o in offers:

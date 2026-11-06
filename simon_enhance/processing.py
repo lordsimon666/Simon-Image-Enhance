@@ -255,6 +255,8 @@ def tone_curve(t: np.ndarray, p: Params) -> np.ndarray:
 # Renderer
 # ---------------------------------------------------------------------------
 
+_KEY_CACHE = None  # (signature, (clean linear, matte)) of the last keyed preview
+
 _ENC_GRID = linear_to_srgb(np.linspace(0, 1, LUT_SIZE, dtype=np.float32)).astype(np.float64)
 
 
@@ -312,7 +314,16 @@ class Renderer:
         keyer = self._keyer(linear.shape[0])
         if keyer is None:
             return self.apply(linear.astype(np.float32, copy=True)), alpha
-        clean, matte = keyer.apply(linear)
+        # the key only depends on the source and the key settings -> cache it, so
+        # moving any other slider stays instant
+        sig = (id(linear), linear.shape, float(linear[::97, ::89].sum()),
+               tuple(v for k, v in sorted(self.params.to_dict().items()) if k.startswith("key_")))
+        global _KEY_CACHE
+        if _KEY_CACHE is not None and _KEY_CACHE[0] == sig:
+            clean, matte = _KEY_CACHE[1]
+        else:
+            clean, matte = keyer.apply(linear)
+            _KEY_CACHE = (sig, (clean, matte))
         if alpha is not None:
             matte = matte * alpha
         return self.apply(clean), matte

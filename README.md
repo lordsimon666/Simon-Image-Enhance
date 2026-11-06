@@ -90,6 +90,25 @@ herstellerspezifische Rechenbibliotheken wie CUDA oder ROCm werden nicht mitgeli
 BiRefNet ließ sich im Test auf einem Software-Vulkan-Treiber nicht über WebGPU ausführen; ob es auf
 echten Grafikkarten läuft, zeigt `--ai-info` bzw. die Statusleiste (sonst rechnet die CPU).
 
+### Optional: NVIDIA CUDA und AMD ROCm nachladen (Linux)
+
+Erkennt die App beim Start einen **NVIDIA-Treiber (CUDA)** oder **AMD ROCm**, fragt sie einmalig,
+ob die herstellerspezifische Laufzeit nachgeladen werden soll – meist deutlich schneller als
+Vulkan und mit Tensor- bzw. Matrix-Kernen. Später jederzeit über
+*Einstellungen → GPU-Laufzeiten (CUDA / ROCm)* nachholen oder wieder entfernen.
+
+| Laufzeit | Download | Voraussetzung auf dem System |
+|---|---|---|
+| NVIDIA CUDA 13 | ~256 MB | NVIDIA-Treiber mit CUDA ≥ 13; cuBLAS/cuDNN werden vom System genutzt oder (~1,3 GB) mitgeladen |
+| NVIDIA CUDA 12 | ~277 MB | älterer NVIDIA-Treiber (CUDA 12); sonst wie oben |
+| AMD ROCm 7 – MIGraphX | ~21 MB | ROCm 7 mit MIGraphX muss installiert sein |
+| AMD ROCm 7 – MIOpen | ~57 MB | ROCm 7 mit MIOpen, hipBLAS, hipFFT muss installiert sein |
+
+Die Pakete kommen offiziell von PyPI (ONNX Runtime von Microsoft, CUDA-Bibliotheken von NVIDIA),
+werden per SHA-256 geprüft und im Datenordner unter `runtimes` abgelegt. Der Grafiktreiber
+selbst kommt immer vom System. Lässt sich die nachgeladene Laufzeit nicht starten, nutzt die
+App automatisch wieder die mitgelieferte (Vulkan). `SIE_GPU_RUNTIME=0` schaltet sie ab.
+
 Weitere Hinweise:
 - **AMD-NPUs** (Ryzen AI / XDNA) werden nicht unterstützt.
 - Für die **Intel-NPU** unter Linux muss der Intel-NPU-Treiber installiert sein.
@@ -234,6 +253,7 @@ simon_enhance/
   ai/engine.py    KI-Laufzeiten: OpenVINO (NPU), DirectML, CUDA, ncnn-Vulkan, CPU
   ai/models.py    Modellregister, Download mit Prüfsumme
   ai/features.py  Hintergrund-KI, Entrauschen, Hochskalieren
+  runtimes.py     optionale CUDA-/ROCm-Laufzeiten: Erkennung, Download, Aktivierung
   fileio.py       Laden (JPEG/PNG/RAW) und Export (JPEG/PNG)
   store.py        Speicherung der Bearbeitungen, Portabel-Modus
   widgets.py      Kurveneditor, Histogramm, Slider, Bildansicht

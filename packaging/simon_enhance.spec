@@ -49,7 +49,7 @@ a = Analysis(
     datas=[(os.path.join(ROOT, "simon_enhance", "assets"), "simon_enhance/assets")] + cl_datas,
     hiddenimports=["rawpy", "rawpy._rawpy", "imageio.v3", "imageio.plugins.pillow", "tifffile",
                    "simon_enhance.ai.engine", "simon_enhance.ai.models", "simon_enhance.ai.features",
-                   "simon_enhance.vulkan_compute"] + cl_hidden,
+                   "simon_enhance.vulkan_compute", "simon_enhance.runtimes"] + cl_hidden,
     excludes=EXCLUDES,
     noarchive=False,
 )

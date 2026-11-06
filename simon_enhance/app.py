@@ -212,6 +212,7 @@ class MainWindow(QMainWindow):
         self._build_actions()
         self._sync_key_ui()
         QTimer.singleShot(300, self._report_gpu)
+        QTimer.singleShot(2000, self._check_gpu_runtimes)
         self._set_enabled(False)
         self.statusBar().showMessage(
             "Bild oder Ordner öffnen (Strg+O / Strg+Shift+O) – oder Dateien hier hineinziehen."
@@ -512,6 +513,10 @@ class MainWindow(QMainWindow):
         self.a_gpu.toggled.connect(self._on_gpu_toggled)
         opt.addAction(self.a_gpu)
         gpu.set_enabled(self.a_gpu.isChecked())
+        a_rt = QAction("GPU-Laufzeiten (CUDA / ROCm) …", self)
+        a_rt.setStatusTip("Herstellerspezifische GPU-Unterstützung für NVIDIA (CUDA) und AMD (ROCm) nachladen")
+        a_rt.triggered.connect(self.gpu_runtime_dialog)
+        opt.addAction(a_rt)
         self.accel_menu = opt.addMenu("KI-Beschleuniger (NPU / GPU / CPU)")
         self.accel_menu.aboutToShow.connect(self._fill_accel_menu)
         from .ai import engine as ai_engine
@@ -974,6 +979,160 @@ class MainWindow(QMainWindow):
 
         self._run_with_progress(f"Lade {m.title} ({size:.0f} MB) …", job, lambda _r: then())
 
+    # ------------------------------------------------------- CUDA / ROCm runtimes
+    @staticmethod
+    def _rt_size_text(offer, items):
+        if items is None:
+            return "Größe unbekannt (keine Verbindung zu PyPI)"
+        rt = items[0]["size"] / 1e6
+        libs = sum(i["size"] for i in items[1:]) / 1e6
+        txt = f"ca. {rt:.0f} MB"
+        if libs:
+            gb = f"{libs / 1000:.1f}".replace(".", ",")
+            txt += f" + {gb} GB {offer.profile.vendor.upper()}-Bibliotheken (sie sind nicht installiert)"
+        return txt
+
+    def _check_gpu_runtimes(self):
+        """Startup: offer CUDA / ROCm support once when the drivers are found."""
+        from . import runtimes
+
+        def job(progress, cancelled):
+            res = []
+            for o in runtimes.detect():
+                items = None
+                if o.possible and o.profile.id not in runtimes.installed():
+                    try:
+                        items = runtimes.plan(o)
+                    except Exception:
+                        items = None
+                res.append((o, items))
+            return res
+
+        t = Task(("rt",), job, None, None)
+        sig = t.signals
+        sig.done.connect(lambda _tag, res: (self._tasks.discard(sig), self._offer_gpu_runtimes(res)))
+        sig.failed.connect(lambda *_a: self._tasks.discard(sig))
+        self._tasks.add(sig)
+        self.pool.start(t)
+
+    def _offer_gpu_runtimes(self, results):
+        from . import runtimes
+        installed = runtimes.installed()
+        for offer, items in results:
+            vendor = offer.profile.vendor
+            key = f"gpu_runtime_asked_{vendor}"
+            if self.settings.get(key) or any(runtimes.PROFILES[p].vendor == vendor for p in installed):
+                continue
+            self.settings.set(key, True)  # ask only once - the settings menu remains
+            name = "NVIDIA-CUDA" if vendor == "nvidia" else "AMD-ROCm"
+            later = ("\n\nWenn Sie das jetzt nicht tun, können Sie es jederzeit unter "
+                     "Einstellungen → GPU-Laufzeiten (CUDA / ROCm) nachholen.")
+            gpus = f" ({', '.join(offer.gpus)})" if offer.gpus else ""
+            if not offer.possible:
+                QMessageBox.information(
+                    self, "GPU-Unterstützung",
+                    f"Auf diesem Computer wurden {name}-Treiber gefunden{gpus}.\n\n{offer.reason}."
+                    + (f"\n\n{offer.profile.install_hint}" if offer.profile.install_hint else "") + later)
+                continue
+            box = QMessageBox(self)
+            box.setWindowTitle("GPU-Unterstützung verfügbar")
+            box.setIcon(QMessageBox.Question)
+            box.setText(f"Auf diesem Computer wurden {name}-Treiber gefunden{gpus}.\n\n"
+                        f"Möchten Sie die {name.split('-')[1]}-Unterstützung nachladen?")
+            box.setInformativeText(
+                f"{offer.profile.title}: Die KI-Funktionen laufen damit über die für Ihre Grafikkarte "
+                f"optimierten Bibliotheken – meist deutlich schneller.\n\nDownload: {self._rt_size_text(offer, items)}"
+                + later)
+            yes = box.addButton("Nachladen", QMessageBox.AcceptRole)
+            box.addButton("Nicht jetzt", QMessageBox.RejectRole)
+            box.exec()
+            if box.clickedButton() is yes:
+                self._install_gpu_runtime(offer)
+            return  # one question per start
+
+    def _install_gpu_runtime(self, offer):
+        from . import runtimes
+
+        def job(progress, cancelled):
+            runtimes.install(offer, lambda f: (progress(f), not cancelled())[1])
+            return True
+
+        def done(_r):
+            box = QMessageBox(self)
+            box.setWindowTitle(APP_TITLE)
+            box.setText(f"{offer.profile.title} wurde installiert.\n\nSie wird nach einem Neustart der App verwendet.")
+            now = box.addButton("Jetzt neu starten", QMessageBox.AcceptRole)
+            box.addButton("Später", QMessageBox.RejectRole)
+            box.exec()
+            if box.clickedButton() is now:
+                self._restart()
+
+        self._run_with_progress(f"Lade {offer.profile.title} …", job, done)
+
+    def _restart(self):
+        from PySide6.QtCore import QProcess
+        if getattr(sys, "frozen", False):
+            QProcess.startDetached(sys.executable, sys.argv[1:])
+        else:
+            QProcess.startDetached(sys.executable, ["-m", "simon_enhance"] + sys.argv[1:])
+        self.close()
+
+    def gpu_runtime_dialog(self):
+        from . import runtimes
+        dlg = QDialog(self)
+        dlg.setWindowTitle("GPU-Laufzeiten (CUDA / ROCm)")
+        lay = QVBoxLayout(dlg)
+        intro = QLabel("Die App nutzt jede Grafikkarte über Vulkan und die Intel-NPU über OpenVINO. "
+                       "Für NVIDIA- und AMD-Karten gibt es zusätzlich herstellerspezifische Laufzeiten "
+                       "(CUDA bzw. ROCm), die meist deutlich schneller sind. Sie werden nur bei Bedarf "
+                       "geladen und nutzen die installierten Treiber.")
+        intro.setWordWrap(True)
+        lay.addWidget(intro)
+        status = QLabel(runtimes.status())
+        status.setStyleSheet("color:#aaa")
+        lay.addWidget(status)
+        QApplication.setOverrideCursor(Qt.WaitCursor)
+        try:
+            offers = runtimes.detect()
+        finally:
+            QApplication.restoreOverrideCursor()
+        installed = runtimes.installed()
+        if not offers and not installed:
+            lay.addWidget(QLabel("Keine NVIDIA-CUDA- oder AMD-ROCm-Treiber gefunden."))
+        for o in offers:
+            row = QHBoxLayout()
+            gpus = f" – {', '.join(o.gpus)}" if o.gpus else ""
+            lbl = QLabel(f"<b>{o.profile.title}</b>{gpus}<br><span style='color:#999'>{o.reason}"
+                         + ("" if o.possible else f"<br>{o.profile.install_hint}") + "</span>")
+            lbl.setWordWrap(True)
+            row.addWidget(lbl, 1)
+            if o.possible and o.profile.id not in installed:
+                b = QPushButton("Nachladen …")
+                b.clicked.connect(lambda _=False, o=o: (dlg.accept(), self._install_gpu_runtime(o)))
+                row.addWidget(b)
+            lay.addLayout(row)
+        for pid in installed:
+            row = QHBoxLayout()
+            act = " (aktiv)" if runtimes.active() == pid else ""
+            row.addWidget(QLabel(f"Installiert: <b>{runtimes.PROFILES[pid].title}</b>{act}"), 1)
+            b = QPushButton("Entfernen")
+
+            def rm(_=False, pid=pid):
+                runtimes.remove(pid)
+                dlg.accept()
+                QMessageBox.information(self, APP_TITLE, "Entfernt. Nach einem Neustart wird wieder die "
+                                                         "mitgelieferte Laufzeit (Vulkan) verwendet.")
+            b.clicked.connect(rm)
+            row.addWidget(b)
+            lay.addLayout(row)
+        bb = QDialogButtonBox()
+        bb.addButton("Schließen", QDialogButtonBox.RejectRole)
+        bb.rejected.connect(dlg.reject)
+        lay.addWidget(bb)
+        dlg.setMinimumWidth(640)
+        dlg.adjustSize()
+        dlg.exec()
+
     def apply_ai_background(self):
         if self.image is None:
             return
@@ -1312,6 +1471,9 @@ def apply_dark_theme(app: QApplication):
 
 def main(argv=None):
     argv = list(sys.argv if argv is None else argv)
+    # a downloaded CUDA / ROCm ONNX Runtime must be hooked in before anything imports it
+    from . import runtimes
+    runtimes.activate()
     if "--gpu-info" in argv:  # quick diagnostics: is the GPU usable?
         print(gpu.status())
         return 0 if gpu.available() else 1
@@ -1319,6 +1481,10 @@ def main(argv=None):
         from .ai import engine as ai_engine, models as ai_models
         import numpy as _np
         print(gpu.status())
+        ai_engine.discover()
+        print(runtimes.status())
+        for o in runtimes.detect():
+            print(f"Erkannt: {o.profile.title} – {o.reason}" + ("" if o.possible else " (nicht nachladbar)"))
         devices = ai_engine.discover()
         print("KI-Beschleuniger:")
         for d in devices:

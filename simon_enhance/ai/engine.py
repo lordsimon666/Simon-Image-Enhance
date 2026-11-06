@@ -57,10 +57,23 @@ _preferred = {"id": "auto"}
 def _ort():
     try:
         import onnxruntime as ort  # type: ignore
+    except Exception as exc:
+        # a downloaded CUDA / ROCm runtime that cannot be loaded must never take the
+        # bundled ONNX Runtime down with it
+        from .. import runtimes
+        if runtimes._state.get("active"):
+            runtimes.deactivate_after_failure(exc)
+            try:
+                import onnxruntime as ort  # type: ignore
+            except Exception:
+                return None
+        else:
+            return None
+    try:
         ort.set_default_logger_severity(3)
-        return ort
     except Exception:
-        return None
+        pass
+    return ort
 
 
 def _ncnn():
@@ -128,10 +141,21 @@ def discover(refresh: bool = False) -> list[Device]:
             if "DmlExecutionProvider" in prov:
                 devs.append(Device("ort:dml:0", "GPU (DirectML)", "dgpu", "onnxruntime", tensor_cores=True))
                 devs.append(Device("ort:dml:npu", "NPU (DirectML)", "npu", "onnxruntime"))
-            if "TensorrtExecutionProvider" in prov:
-                devs.append(Device("ort:tensorrt:0", "NVIDIA GPU (TensorRT)", "dgpu", "onnxruntime", tensor_cores=True))
+            from .. import runtimes
+            gpu_name = None
             if "CUDAExecutionProvider" in prov:
-                devs.append(Device("ort:cuda:0", "NVIDIA GPU (CUDA)", "dgpu", "onnxruntime", tensor_cores=True))
+                info = runtimes.cuda_driver()
+                gpu_name = (info or {}).get("gpus", [None])[0] if info and info.get("gpus") else None
+            if "TensorrtExecutionProvider" in prov and runtimes._find_lib("libnvinfer.so.10"):
+                devs.append(Device("ort:tensorrt:0", f"{gpu_name or 'NVIDIA GPU'} (TensorRT)", "dgpu",
+                                   "onnxruntime", tensor_cores=True))
+            if "CUDAExecutionProvider" in prov:
+                devs.append(Device("ort:cuda:0", f"{gpu_name or 'NVIDIA GPU'} (CUDA)", "dgpu", "onnxruntime",
+                                   tensor_cores=True))
+            if "MIGraphXExecutionProvider" in prov:
+                devs.append(Device("ort:migraphx:0", "AMD GPU (ROCm MIGraphX)", "dgpu", "onnxruntime"))
+            if "ROCMExecutionProvider" in prov:
+                devs.append(Device("ort:rocm:0", "AMD GPU (ROCm)", "dgpu", "onnxruntime"))
             if "WebGpuExecutionProvider" in prov:
                 gpus = _vulkan_gpus()
                 if gpus or os.name == "nt":
@@ -169,7 +193,8 @@ def discover(refresh: bool = False) -> list[Device]:
         if ort is not None:
             devs.append(Device("ort:cpu", "CPU", "cpu", "onnxruntime"))
         rt_order = {"ncnn": 0, "onnxruntime": 1, "openvino": 2}
-        devs.sort(key=lambda d: (KIND_ORDER[d.kind], 0 if d.id.startswith(("ort:cuda", "ort:tensorrt")) else 1,
+        vendor_rt = ("ort:tensorrt", "ort:cuda", "ort:migraphx", "ort:rocm")  # vendor-optimised first
+        devs.sort(key=lambda d: (KIND_ORDER[d.kind], 0 if d.id.startswith(vendor_rt) else 1,
                                  rt_order.get(d.runtime, 3)))
         _devices = devs
         return devs
@@ -233,6 +258,10 @@ class _OrtRunner:
                          "CPUExecutionProvider"]
         elif parts[1] == "cuda":
             providers = [("CUDAExecutionProvider", {"device_id": 0}), "CPUExecutionProvider"]
+        elif parts[1] == "migraphx":
+            providers = [("MIGraphXExecutionProvider", {"device_id": 0}), "CPUExecutionProvider"]
+        elif parts[1] == "rocm":
+            providers = [("ROCMExecutionProvider", {"device_id": 0}), "CPUExecutionProvider"]
         elif parts[1] == "webgpu":
             providers = [("WebGpuExecutionProvider", {}), "CPUExecutionProvider"]
         else:

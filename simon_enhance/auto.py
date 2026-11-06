@@ -317,3 +317,92 @@ def ai_correct(linear: np.ndarray, params: Params, strength: float = 1.0) -> Par
         curves = {c: _blend_points(p, strength) for c, p in curves.items()}
     out.curves = curves
     return out
+
+
+# ---------------------------------------------------------------------------
+# neural variant: a network trained on expert retouching (MIT-Adobe FiveK) shows
+# *what* the photo should look like; we then derive the white balance and tone /
+# colour curves that reproduce that look. The result stays fully editable and is
+# still limited to white balance + curves.
+# ---------------------------------------------------------------------------
+
+def _quantile_points(src: np.ndarray, dst: np.ndarray, qs) -> list:
+    a = np.quantile(src, qs)
+    b = np.quantile(dst, qs)
+    pts = [[0.0, 0.0]]
+    for x, y in zip(a, b):
+        if x - pts[-1][0] > 0.02 and 0.0 < x < 1.0:
+            pts.append([float(x), float(np.clip(y, pts[-1][1], 1.0))])
+    if 1.0 - pts[-1][0] < 0.02:
+        pts.pop()
+    pts.append([1.0, 1.0])
+    return [[round(x, 4), round(y, 4)] for x, y in pts]
+
+
+def neural_color(linear: np.ndarray, params: Params, strength: float = 1.0, mask=None) -> Params:
+    """"Profi-Look": white balance + curves fitted to the FiveK retouching network.
+
+    Measured on real photos this is a *style* (warmer, punchier, like the FiveK
+    experts), not a more neutral correction - ``ai_correct`` remains the neutral one."""
+    from PIL import Image
+    from .ai import engine as E
+    from .processing import linear_to_srgb, srgb_to_linear
+
+    strength = float(np.clip(strength, 0.0, 1.0))
+    small = _downsample(linear, 768)
+    from .greenscreen import KeyMatte, has_key
+    if mask is None and has_key(params):  # removed backdrop: only the subject counts
+        small, alpha = KeyMatte(params, small.shape[0]).apply(small)
+        mask = alpha > 0.5
+    elif mask is not None:
+        mask = _downsample_mask(mask, 768)
+    has_key_mask = mask is not None
+    srgb = linear_to_srgb(small)
+    im = Image.fromarray((srgb * 255 + 0.5).astype(np.uint8)).resize((512, 512), Image.Resampling.BILINEAR)
+    x = np.asarray(im, np.float32) / 255.0
+    y = E.run("cidnet", np.ascontiguousarray(x.transpose(2, 0, 1)[None]))[0].transpose(1, 2, 0)
+    y = np.clip(y, 0.0, 1.0)
+    src, dst = x.reshape(-1, 3), y.reshape(-1, 3)
+    if has_key_mask:
+        m = np.asarray(Image.fromarray(mask.astype(np.uint8) * 255).resize((512, 512)), np.uint8).reshape(-1) > 127
+        if m.sum() > 500:
+            src, dst = src[m], dst[m]
+
+    # 1) white balance: relative channel gains between the original and the target,
+    #    measured on well exposed, not too saturated pixels (in linear light)
+    ls, ld = srgb_to_linear(src), srgb_to_linear(dst)
+    lum = ls @ LUM_WEIGHTS
+    ok = (lum > 0.02) & (ls.max(axis=1) < 0.95)
+    sat = (src.max(axis=1) - src.min(axis=1)) / np.maximum(src.max(axis=1), 1e-3)
+    sel = ok & (sat < 0.5)
+    if sel.sum() < 200:
+        sel = ok if ok.sum() > 200 else np.ones(len(ls), bool)
+    out = params.copy()
+    gains = (ld[sel].sum(axis=0) + 1e-6) / (ls[sel].sum(axis=0) + 1e-6)
+    gains /= gains[1]
+    temp, tint = solve_white_balance(1.0 / gains)
+    mired_ref = 1e6 / NEUTRAL_TEMP
+    out.temp = 1e6 / (mired_ref + (1e6 / temp - mired_ref) * strength)
+    out.tint = float(np.clip(tint, -60, 60)) * strength
+
+    # 2) curves: render the original with the new white balance and identity curves,
+    #    then match its tones (master curve) and colour balance (R/G/B curves) to the target
+    base = out.copy()
+    base.curves = {c: identity_curve() for c in base.curves}
+    rend = Renderer(base).apply(srgb_to_linear(x).copy()).reshape(-1, 3)
+    if has_key_mask and m.sum() > 500:
+        rend = rend[m]
+    qs = np.array([0.01, 0.1, 0.3, 0.5, 0.7, 0.9, 0.99])
+    master = _quantile_points(rend @ LUM_WEIGHTS, dst @ LUM_WEIGHTS, qs)
+    curves = {"rgb": master}
+    after_master = eval_curve(master, rend)
+    for i, c in enumerate("rgb"):
+        pts = _quantile_points(after_master[:, i], dst[:, i], np.array([0.05, 0.5, 0.95]))
+        # gentle: halfway between identity and the fitted channel curve
+        pts = [[x_, x_ + (y_ - x_) * 0.5] for x_, y_ in pts]
+        curves[c] = identity_curve() if max(abs(y_ - x_) for x_, y_ in pts) < 0.004 else \
+            [[round(a, 4), round(b, 4)] for a, b in pts]
+    if strength < 1.0:
+        curves = {c: _blend_points(p, strength) for c, p in curves.items()}
+    out.curves = curves
+    return out

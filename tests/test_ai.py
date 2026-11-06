@@ -165,3 +165,32 @@ def test_denoise_reduces_noise(tmp_path):
     noisy = np.clip(clean + rng.normal(0, 0.06, clean.shape), 0, 1).astype(np.float32)
     out = E.run_tiled("scunet", noisy)
     assert np.abs(out - clean).mean() < 0.6 * np.abs(noisy - clean).mean()
+
+
+def test_cidnet_bundled_and_neural_color_only_sets_wb_and_curves():
+    from simon_enhance.auto import neural_color
+    from simon_enhance.processing import Params, render, srgb_to_linear
+    assert M.is_available("cidnet")
+    import hashlib
+    f = M.MODELS["cidnet"].files[0]
+    assert hashlib.sha256(open(M.path_of(f), "rb").read()).hexdigest() == f.sha256
+    lin = srgb_to_linear(_photo(300, 400) * 0.6)  # a little dark
+    base = Params(exposure=0.1, saturation=5)
+    p = neural_color(lin, base)
+    for k in ("exposure", "contrast", "highlights", "shadows", "whites", "blacks", "vibrance", "saturation"):
+        assert getattr(p, k) == getattr(base, k)
+    assert p.curves["rgb"] != [[0.0, 0.0], [1.0, 1.0]]
+    out = render(lin, p)
+    assert np.isfinite(out).all() and out.mean() > render(lin, base).mean()  # brightens a dark photo
+    assert neural_color(lin, base, strength=0.0).temp == pytest.approx(base.temp, abs=1)
+
+
+def test_cidnet_network_output_is_sane():
+    x = np.full((1, 3, 512, 512), 0.4, np.float32)
+    x[:, :, 100:300, 100:300] = [[[0.8]], [[0.3]], [[0.2]]]
+    y = E.run("cidnet", x)
+    assert y.shape == x.shape and np.isfinite(y).all()
+    assert 0.0 <= y.min() and y.max() <= 1.0 + 1e-4
+    # keeps the picture: the red square stays red, the background stays grey
+    assert y[0, 0, 200, 200] > y[0, 1, 200, 200] + 0.2
+    assert abs(float(y[0, 0, 20, 20]) - float(y[0, 2, 20, 20])) < 0.05

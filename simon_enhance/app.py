@@ -266,6 +266,18 @@ class MainWindow(QMainWindow):
                                "Gradationskurven (Strg+U). Alles bleibt danach anpassbar.")
         self.ai_btn.clicked.connect(self.apply_ai)
         self.ai_strength = SliderRow("Stärke", 0, 100, 100)
+        self.ai_method = QComboBox()
+        self.ai_method.addItem("Analyse – neutral (empfohlen)", "analysis")
+        self.ai_method.addItem("Neuronales Netz – Profi-Look (FiveK)", "neural")
+        self.ai_method.setToolTip(
+            "Analyse: physikalisch, entfernt Farbstiche am zuverlässigsten.\n"
+            "Profi-Look: Netz, trainiert auf 5000 von Profis bearbeiteten Fotos (MIT-Adobe FiveK) –\n"
+            "kräftiger und etwas wärmer. Beide setzen nur Weißabgleich und Kurven.")
+        idx = self.ai_method.findData(self.settings.get("ai_method", "analysis"))
+        self.ai_method.setCurrentIndex(max(idx, 0))
+        self.ai_method.currentIndexChanged.connect(
+            lambda _i: self.settings.set("ai_method", self.ai_method.currentData()))
+        al.addWidget(self.ai_method)
         al.addWidget(self.ai_btn)
         al.addWidget(self.ai_strength)
         note = QLabel("Ändert nur Weißabgleich und Kurven.")
@@ -817,11 +829,25 @@ class MainWindow(QMainWindow):
         if self.image is None:
             return
         strength = self.ai_strength.value() / 100.0
-        p = ai_correct(self.image.linear, self.params, strength)
+        try:
+            p = self._auto_color(self.image.linear, self.params, strength)
+        except Exception as exc:  # noqa: BLE001
+            QMessageBox.warning(self, APP_TITLE, f"KI-Korrektur fehlgeschlagen:\n{exc}")
+            return
         self._set_params(p)
         self.wb_preset.setCurrentText("Auto")
+        extra = ""
+        if self.ai_method.currentData() == "neural":
+            from .ai import engine as ai_engine
+            extra = f" – Netz lief auf {ai_engine.describe(ai_engine.last_device('cidnet'))}"
         self.statusBar().showMessage(
-            f"KI-Korrektur: Temperatur {p.temp:.0f} K, Tönung {p.tint:+.0f}, Kurven gesetzt", 4000)
+            f"KI-Korrektur: Temperatur {p.temp:.0f} K, Tönung {p.tint:+.0f}, Kurven gesetzt{extra}", 6000)
+
+    def _auto_color(self, linear, params, strength):
+        if self.ai_method.currentData() == "neural":
+            from .auto import neural_color
+            return neural_color(linear, params, strength)
+        return ai_correct(linear, params, strength)
 
     def apply_key(self):
         if self.image is None:
@@ -1038,7 +1064,7 @@ class MainWindow(QMainWindow):
             try:
                 data = self.image if self.image and self.image.path == fp else load_image(fp, True)
                 base = self.store.get(fp) or Params()
-                p = ai_correct(data.linear, base, strength)
+                p = self._auto_color(data.linear, base, strength)
                 self.store.set(fp, p)
                 if self.image and self.image.path == fp:
                     self._set_params(p)

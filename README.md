@@ -12,7 +12,7 @@ gespeichert und erst beim Export angewendet.
 |---|---|
 | **Weißabgleich** | Temperatur (Kelvin) & Tönung, Pipette (auf neutrale Stelle klicken), Voreinstellungen (Tageslicht, Bewölkt, Kunstlicht …) |
 | **Gradationskurve** | Interaktive Kurven für RGB, Rot, Grün, Blau (Klick = Punkt, Ziehen = verschieben, Rechtsklick/Doppelklick = löschen) |
-| **KI-Korrektur** | Analysiert das Bild und setzt **nur Weißabgleich und Gradationskurven** automatisch. Stärke einstellbar, danach alles feinjustierbar. Auch für mehrere Bilder auf einmal. |
+| **KI-Korrektur** | Setzt **nur Weißabgleich und Gradationskurven** automatisch – wahlweise per physikalischer *Analyse* (neutral, empfohlen) oder per *neuronalem Netz* („Profi-Look“, trainiert auf 5000 von Profis bearbeiteten Fotos). Stärke einstellbar, danach alles feinjustierbar. Auch für mehrere Bilder auf einmal. |
 | **Hintergrund entfernen (KI)** | Erkennt Green- und Bluescreens automatisch und macht sie transparent – auch bei Falten, Schatten und ungleichmäßiger Ausleuchtung. Regler für Toleranz, Weichheit, Kante und Entfärben (entfernt grüne Reflexe). PNG-Export speichert die Transparenz (8 und 16 Bit), JPEG bekommt eine wählbare Hintergrundfarbe. |
 | **Hintergrund entfernen – jedes Foto** | Neuronales Netz (BiRefNet) stellt Personen und Objekte frei, ganz ohne Greenscreen; Kanten werden in voller Auflösung verfeinert. Export als transparentes PNG. |
 | **KI-Verbessern** | Entrauschen (SCUNet) und Hochskalieren 2×/4× (Real-ESRGAN) des Originals in eine **neue 16-Bit-TIFF-Datei** – wie „Verbessern“ in Lightroom |
@@ -32,6 +32,13 @@ Läuft komplett offline auf deinem Rechner, ohne Cloud.
    werden ignoriert. Wie stark korrigiert wird, hängt von der Sicherheit ab: Bei Mischlicht
    oder wenig neutralen Flächen korrigiert die KI vorsichtiger, und bei sehr warmem/kaltem
    Licht (Sonnenuntergang, Kerzenlicht) bleibt etwas Stimmung erhalten.
+**Methode „Neuronales Netz – Profi-Look“:** Das Netz HVI-CIDNet (trainiert auf dem
+MIT-Adobe-FiveK-Datensatz) erzeugt eine „Profi-Version“ des Fotos. Daraus werden der
+Weißabgleich und die RGB-/Kanal-Kurven berechnet, die dieses Ergebnis nachbilden – die
+Korrektur bleibt also auf Weißabgleich und Kurven beschränkt und voll editierbar.
+Gemessen an Fotos ist das ein *Stil* (kräftiger, etwas wärmer), keine neutralere
+Korrektur; für reines Entfernen von Farbstichen ist die Analyse besser.
+
 2. **Kurven:** Aus dem Histogramm werden Schwarz-/Weißpunkt, Mitteltöne (behutsam, damit
    Abend- und Low-Key-Bilder ihre Stimmung behalten) und ein angepasster S-Kontrast bestimmt.
    Farbstiche in Tiefen und Lichtern werden über die R/G/B-Kurven entfernt – gemessen nur an
@@ -73,6 +80,7 @@ simon-image-enhance --ai-info
 | Hintergrund entfernen | BiRefNet-lite (MIT) | 224 MB, einmalig | NPU*, DirectML-GPU, CPU |
 | Entrauschen | SCUNet real (Apache-2.0/MIT) | 77 MB, einmalig | NPU*, DirectML-GPU, CPU |
 | Hochskalieren | Real-ESRGAN general-x4v3 (BSD-3) | in der App enthalten | Vulkan-GPU, NPU*, DirectML-GPU, CPU |
+| KI-Korrektur „Profi-Look“ | HVI-CIDNet FiveK (MIT) | in der App enthalten | NPU*, DirectML-GPU, CPU |
 
 \* NPUs können nicht jedes Modell übersetzen – dann übernimmt automatisch die nächste Hardware.
 

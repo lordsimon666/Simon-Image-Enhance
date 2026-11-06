@@ -66,6 +66,16 @@ MODELS = {
                          "98825ea1210b641c71e5f052f582c70c49fd44b35387ebe2c034268c17df3feb", 73138176)),
         tile=256,
     ),
+    "cidnet": ModelInfo(
+        id="cidnet",
+        title="HVI-CIDNet FiveK (KI-Auto-Farbe)",
+        license="MIT (Fediory / HVI-CIDNet authors)",
+        source="https://huggingface.co/Fediory/HVI-CIDNet-FiveK",
+        files=(ModelFile("cidnet_fivek.onnx", "",
+                         "b88114e2a9e3e64d3d2274060decb7e6d5032d88efa3c49c63a31f48c4dd8c0a", 9950341),),
+        fixed=(512, 512),
+        notes="trained on MIT-Adobe FiveK (expert retouching); used only to derive WB + curves",
+    ),
     "realesr": ModelInfo(
         id="realesr",
         title="Real-ESRGAN general x4v3 (Hochskalieren)",

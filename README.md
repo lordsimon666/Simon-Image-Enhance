@@ -92,7 +92,8 @@ echten Grafikkarten läuft, zeigt `--ai-info` bzw. die Statusleiste (sonst rechn
 
 ### Optional: NVIDIA CUDA und AMD ROCm nachladen (Linux)
 
-Erkennt die App beim Start einen **NVIDIA-Treiber (CUDA)** oder **AMD ROCm**, fragt sie einmalig,
+Erkennt die App beim Start einen **NVIDIA-Treiber (CUDA)** oder eine von **AMD ROCm 10** unterstützte
+Radeon-Grafik, fragt sie einmalig,
 ob die herstellerspezifische Laufzeit nachgeladen werden soll – meist deutlich schneller als
 Vulkan und mit Tensor- bzw. Matrix-Kernen. Später jederzeit über
 *Einstellungen → GPU-Laufzeiten und Treiber* nachholen oder wieder entfernen.
@@ -101,25 +102,45 @@ Vulkan und mit Tensor- bzw. Matrix-Kernen. Später jederzeit über
 |---|---|---|
 | NVIDIA CUDA 13 | ~256 MB | NVIDIA-Treiber mit CUDA ≥ 13; cuBLAS/cuDNN werden vom System genutzt oder (~1,3 GB) mitgeladen |
 | NVIDIA CUDA 12 | ~277 MB | älterer NVIDIA-Treiber (CUDA 12); sonst wie oben |
-| AMD ROCm 7 – MIGraphX | ~21 MB | ROCm 7 mit MIGraphX muss installiert sein |
-| AMD ROCm 7 – MIOpen | ~57 MB | ROCm 7 mit MIOpen, hipBLAS, hipFFT muss installiert sein |
+| AMD ROCm 10.1 – MIGraphX | ~0,95–1,2 GB (je nach GPU), entpackt ~4 GB | nur der amdgpu-Kerneltreiber und Zugriff auf `/dev/kfd` – ROCm selbst muss **nicht** installiert sein |
 
-Die Pakete kommen offiziell von PyPI (ONNX Runtime von Microsoft, CUDA-Bibliotheken von NVIDIA),
-werden per SHA-256 geprüft und im Datenordner unter `runtimes` abgelegt. Der Grafiktreiber
-selbst kommt immer vom System. Lässt sich die nachgeladene Laufzeit nicht starten, nutzt die
+**ROCm 10:** AMD liefert ROCm seit Version 10 vollständig als Python-Pakete aus. Die App lädt
+`rocm-sdk-core`, `rocm-sdk-libraries`, das Paket für die erkannte GPU (`rocm-sdk-device-gfxNNNN`),
+`migraphx-libs` und das MIGraphX-Plugin für ONNX Runtime 1.29 (`onnxruntime-ep-migraphx`) von
+`stable.repo.amd.com` – als feste Dateien mit fest eingetragenen SHA-256-Prüfsummen – und registriert
+das Plugin beim Start. Unterstützt (laut AMD für ONNX Runtime freigegeben): Radeon RX 7000
+(gfx1100/1101/1102), RX 9000 (gfx1200/1201) und Ryzen-AI-Grafik (gfx1150–1153). Ältere Karten
+(RX 6000, Radeon 780M, Steam Deck) laufen weiter über Vulkan. Die GPU wird über
+`/sys/class/kfd` erkannt; fehlt der Zugriff auf `/dev/kfd`, zeigt die App eine Anleitung
+(Gruppen `render`/`video` bzw. auf atomaren Systemen wie Bazzite eine udev-Regel). Das Flatpak
+hat dafür `--device=all`. Die früheren ROCm-7-Laufzeiten (System-ROCm nötig) entfallen.
+
+Die NVIDIA-Pakete kommen offiziell von PyPI (ONNX Runtime von Microsoft, CUDA-Bibliotheken von NVIDIA),
+die AMD-Pakete von AMD; alle werden per SHA-256 geprüft und im Datenordner unter `runtimes`
+abgelegt. Der Kernel-Grafiktreiber selbst kommt immer vom System. Lässt sich die nachgeladene Laufzeit nicht starten, nutzt die
 App automatisch wieder die mitgelieferte (Vulkan). `SIE_GPU_RUNTIME=0` schaltet sie ab.
 
 ### Fehlende Treiber: Installationsanleitung für das eigene System
 
 Findet die App eine Grafikkarte oder NPU, deren Treiber fehlt (z. B. NVIDIA-Karte mit dem freien
-„nouveau“-Treiber, kein Vulkan-Treiber, fehlendes ROCm, fehlender Intel-NPU-Treiber), bietet sie
+„nouveau“-Treiber, kein Vulkan-Treiber, kein Zugriff auf den AMD-Rechentreiber, fehlender Intel-NPU-Treiber), bietet sie
 einmalig eine **Installationsanleitung für das erkannte Betriebssystem** an – mit Befehlen zum
 Kopieren. Jederzeit erreichbar unter *Einstellungen → GPU-Laufzeiten und Treiber*.
 
-Berücksichtigte Systeme: **Bazzite** und andere Universal-Blue-Images (Bluefin, Aurora – dort per
-Wechsel auf das passende NVIDIA-Image mit `rpm-ostree rebase`), Fedora Atomic (Silverblue, Kinoite),
+Berücksichtigte Systeme: **Bazzite** und andere Universal-Blue-Images (Bluefin, Aurora), Fedora Atomic (Silverblue, Kinoite),
 Fedora, Ubuntu, Linux Mint, Pop!_OS, Debian, Arch, Manjaro, CachyOS, openSUSE; für andere
 Systeme allgemeine Hinweise mit Links. Läuft die App als Flatpak, wird das Wirtssystem erkannt.
+
+**Bazzite** (nach der offiziellen Bazzite-Dokumentation):
+- NVIDIA-Treiber werden nicht installiert, sondern man wechselt auf das passende Image
+  (`brh rebase IMAGE:TAG`, gleichwertig `rpm-ostree rebase ostree-image-signed:docker://ghcr.io/ublue-os/IMAGE:TAG`).
+  Die App wählt das Image anhand der Karte: `-nvidia-open` für GTX 16xx/RTX, `-nvidia` für
+  GTX 9xx/10xx (Maxwell/Pascal/Volta), behält KDE bzw. GNOME und den Update-Zweig bei und nimmt für
+  Bazzite-Deck `bazzite-deck-nvidia` bzw. `bazzite-deck-nvidia-gnome` (ältere Karten: Desktop-Ausgabe).
+  Für Kepler-Karten (GTX 7xx) gibt es keinen Treiber mehr – das sagt die Anleitung auch.
+- Hinweise zu Secure Boot (`ujust enroll-secure-boot-key`), Rückweg (`brh rollback`), Treiber-Updates
+  über die normalen Systemupdates und zu gelayerten Paketen, die einen Rebase blockieren (`rpm-ostree reset`).
+- ROCm: Nichts wird ins Image gelayert – die App lädt ROCm 10 selbst; nötig ist nur die udev-Regel für `/dev/kfd`.
 
 Weitere Hinweise:
 - **AMD-NPUs** (Ryzen AI / XDNA) werden nicht unterstützt.

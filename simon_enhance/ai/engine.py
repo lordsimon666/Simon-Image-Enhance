@@ -73,7 +73,27 @@ def _ort():
         ort.set_default_logger_severity(3)
     except Exception:
         pass
+    from .. import runtimes
+    runtimes.register_plugins(ort)  # ROCm 10: MIGraphX is an execution-provider plugin
     return ort
+
+
+def _plugin_devices(ort, ep_name: str) -> list:
+    """EP devices of a registered execution-provider plugin (ONNX Runtime >= 1.22)."""
+    try:
+        return [d for d in ort.get_ep_devices() if d.ep_name == ep_name]
+    except Exception:  # noqa: BLE001 - older ONNX Runtime: providers are chosen by name
+        return []
+
+
+def _amd_label() -> str:
+    from .. import runtimes
+    try:
+        gfx = (runtimes.rocm_driver() or {}).get("gfx") or []
+    except Exception:  # noqa: BLE001
+        gfx = []
+    name = next((runtimes.GFX_NAMES[g] for g in gfx if g in runtimes.GFX_NAMES), "AMD GPU")
+    return f"{name} (ROCm 10 · MIGraphX)"
 
 
 def _ncnn():
@@ -153,9 +173,7 @@ def discover(refresh: bool = False) -> list[Device]:
                 devs.append(Device("ort:cuda:0", f"{gpu_name or 'NVIDIA GPU'} (CUDA)", "dgpu", "onnxruntime",
                                    tensor_cores=True))
             if "MIGraphXExecutionProvider" in prov:
-                devs.append(Device("ort:migraphx:0", "AMD GPU (ROCm MIGraphX)", "dgpu", "onnxruntime"))
-            if "ROCMExecutionProvider" in prov:
-                devs.append(Device("ort:rocm:0", "AMD GPU (ROCm)", "dgpu", "onnxruntime"))
+                devs.append(Device("ort:migraphx:0", _amd_label(), "dgpu", "onnxruntime"))
             if "WebGpuExecutionProvider" in prov:
                 gpus = _vulkan_gpus()
                 if gpus or os.name == "nt":
@@ -193,7 +211,7 @@ def discover(refresh: bool = False) -> list[Device]:
         if ort is not None:
             devs.append(Device("ort:cpu", "CPU", "cpu", "onnxruntime"))
         rt_order = {"ncnn": 0, "onnxruntime": 1, "openvino": 2}
-        vendor_rt = ("ort:tensorrt", "ort:cuda", "ort:migraphx", "ort:rocm")  # vendor-optimised first
+        vendor_rt = ("ort:tensorrt", "ort:cuda", "ort:migraphx")  # vendor-optimised first
         devs.sort(key=lambda d: (KIND_ORDER[d.kind], 0 if d.id.startswith(vendor_rt) else 1,
                                  rt_order.get(d.runtime, 3)))
         _devices = devs
@@ -260,8 +278,10 @@ class _OrtRunner:
             providers = [("CUDAExecutionProvider", {"device_id": 0}), "CPUExecutionProvider"]
         elif parts[1] == "migraphx":
             providers = [("MIGraphXExecutionProvider", {"device_id": 0}), "CPUExecutionProvider"]
-        elif parts[1] == "rocm":
-            providers = [("ROCMExecutionProvider", {"device_id": 0}), "CPUExecutionProvider"]
+            plugin_devs = _plugin_devices(ort, "MIGraphXExecutionProvider")
+            if plugin_devs:  # ROCm 10 plugin: selected through its EP device
+                so.add_provider_for_devices(plugin_devs[:1], {})
+                providers = None
         elif parts[1] == "webgpu":
             providers = [("WebGpuExecutionProvider", {}), "CPUExecutionProvider"]
         else:

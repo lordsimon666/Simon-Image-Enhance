@@ -85,14 +85,15 @@ def test_detect_nvidia_and_amd(monkeypatch):
     monkeypatch.setattr(R.sys, "platform", "linux")
     monkeypatch.setattr(R.platform, "machine", lambda: "x86_64")
     monkeypatch.setattr(R, "cuda_driver", lambda: {"version": 13020, "gpus": ["RTX Test"]})
-    monkeypatch.setattr(R, "rocm_driver", lambda: {"hip": "libamdhip64.so.7", "rocm7": True})
-    have = {"libamdhip64.so.7", "libcudart.so.13"}
+    monkeypatch.setattr(R, "rocm_driver", lambda: {"kfd": True, "access": False, "gfx": ["gfx1100"]})
+    monkeypatch.setattr(R.sys, "version_info", (3, 12, 9))
+    have = {"libcudart.so.13"}
     monkeypatch.setattr(R, "_find_lib", lambda n: n if n in have else None)
     offers = {o.profile.id: o for o in R.detect()}
     assert offers["cuda13"].possible and offers["cuda13"].need_lib_wheels  # cuDNN etc. missing
     assert "libcudnn.so.9" in offers["cuda13"].missing
-    amd = [o for o in offers.values() if o.profile.vendor == "amd"][0]
-    assert not amd.possible and "libmigraphx_c.so.3" in amd.reason
+    amd = offers["rocm10"]
+    assert not amd.possible and "/dev/kfd" in amd.reason and amd.target == "gfx1100" and not amd.quiet
     # old driver -> CUDA 12 build
     monkeypatch.setattr(R, "cuda_driver", lambda: {"version": 12040, "gpus": []})
     assert [o.profile.id for o in R.detect() if o.profile.vendor == "nvidia"] == ["cuda12"]
@@ -170,3 +171,68 @@ def test_broken_runtime_falls_back_to_bundled(data):
     out = subprocess.run([sys.executable, "-c", code], capture_output=True, text=True, cwd=root,
                          env=dict(os.environ, PYTHONPATH=root)).stdout
     assert out.startswith("True") and "nicht nutzbar" in out
+
+
+def _sysfs(tmp_path, versions, kfd=True):
+    for n, v in enumerate(versions):
+        d = tmp_path / f"sys/class/kfd/kfd/topology/nodes/{n}"
+        d.mkdir(parents=True)
+        (d / "properties").write_text(f"cpu_cores_count 0\ngfx_target_version {v}\nsimd_count 96\n")
+    if kfd:
+        (tmp_path / "dev").mkdir()
+        (tmp_path / "dev/kfd").write_text("")
+    return str(tmp_path)
+
+
+def test_gfx_targets_from_kfd_topology(tmp_path):
+    assert R.gfx_name(110000) == "gfx1100" and R.gfx_name(120001) == "gfx1201"
+    assert R.gfx_name(90010) == "gfx90a" and R.gfx_name(110501) == "gfx1151"
+    info = R.rocm_driver(_sysfs(tmp_path, [0, 110000, 110000, 120001]))  # CPU node reports 0
+    assert info["gfx"] == ["gfx1100", "gfx1201"] and info["kfd"]
+    assert R.rocm_driver(str(tmp_path / "nothing")) is None
+
+
+@pytest.mark.parametrize("gfx,access,possible,quiet", [
+    (["gfx1201"], True, True, False),
+    (["gfx1151"], False, False, False),        # fixable: guide offered
+    (["gfx1033"], True, False, True),          # Steam Deck: not supported, stays on Vulkan
+    (["gfx1033", "gfx1100"], True, True, False),
+])
+def test_rocm10_offer(gfx, access, possible, quiet, monkeypatch):
+    monkeypatch.setattr(R.sys, "version_info", (3, 12, 9))
+    o = R._rocm10_offer({"kfd": True, "access": access, "gfx": gfx})
+    assert (o.possible, o.quiet) == (possible, quiet)
+    if possible:
+        items = R.plan(o)                      # pinned: no network needed
+        names = [i["name"] for i in items]
+        assert names[0] == "onnxruntime" and items[0]["version"] == "1.29.0"
+        assert names[-1] == f"rocm-sdk-device-{o.target}"
+        assert {"onnxruntime-ep-migraphx", "migraphx-libs", "rocm-sdk-core", "rocm-sdk-libraries"} <= set(names)
+        assert all(len(i["sha256"]) == 64 and i["size"] > 0 and i["url"].startswith("https://") for i in items)
+        assert all("cp312" in i["filename"] or "py3-none" in i["filename"] for i in items)
+        assert 0.8e9 < sum(i["size"] for i in items) < 1.4e9
+
+
+def test_rocm10_needs_python_312(monkeypatch):
+    monkeypatch.setattr(R.sys, "version_info", (3, 13, 1))
+    o = R._rocm10_offer({"kfd": True, "access": True, "gfx": ["gfx1100"]})
+    assert not o.possible and o.quiet and "3.12" in o.reason
+
+
+def test_plugin_registration(monkeypatch, tmp_path):
+    import types
+    plugin = types.ModuleType("onnxruntime_ep_migraphx")
+    plugin.get_ep_names = lambda: ["MIGraphXExecutionProvider"]
+    plugin.get_library_paths = lambda: ["/x/libmigraphx-ep.so"]
+    monkeypatch.setitem(sys.modules, "onnxruntime_ep_migraphx", plugin)
+    seen = []
+    ort = types.SimpleNamespace(register_execution_provider_library=lambda n, p: seen.append((n, p)))
+    monkeypatch.setattr(R, "_state", {"active": "rocm10", "error": None, "finder": None, "registered": None})
+    assert R.register_plugins(ort) == ["MIGraphXExecutionProvider"]
+    assert R.register_plugins(ort) == ["MIGraphXExecutionProvider"] and len(seen) == 1   # only once
+    # a broken plugin must not break ONNX Runtime
+    monkeypatch.setattr(R, "_state", {"active": "rocm10", "error": None, "finder": None, "registered": None})
+    plugin.get_library_paths = lambda: (_ for _ in ()).throw(OSError("libamdhip64.so.7 fehlt"))
+    assert R.register_plugins(ort) == [] and "libamdhip64" in R.status()
+    monkeypatch.setattr(R, "_state", {"active": "cuda13", "error": None, "finder": None, "registered": None})
+    assert R.register_plugins(ort) == []

@@ -984,6 +984,11 @@ class MainWindow(QMainWindow):
     def _rt_size_text(offer, items):
         if items is None:
             return "Größe unbekannt (keine Verbindung zu PyPI)"
+        if offer.profile.pinned:  # ROCm 10: the whole AMD user space comes along
+            gb = lambda v: f"{v:.1f}".replace(".", ",")  # noqa: E731
+            total = sum(i["size"] for i in items) / 1e9
+            return (f"ca. {gb(total)} GB von AMD ({offer.target}); entpackt ca. {gb(offer.profile.disk_gb)} GB im "
+                    "Benutzerordner – am System wird nichts verändert")
         rt = items[0]["size"] / 1e6
         libs = sum(i["size"] for i in items[1:]) / 1e6
         txt = f"ca. {rt:.0f} MB"
@@ -1030,21 +1035,37 @@ class MainWindow(QMainWindow):
             key = f"gpu_runtime_asked_{vendor}"
             if self.settings.get(key) or any(runtimes.PROFILES[p].vendor == vendor for p in installed):
                 continue
+            if offer.quiet:
+                continue  # e.g. an AMD GPU that ROCm does not support: Vulkan is used, nothing to do
             self.settings.set(key, True)  # ask only once - the settings menu remains
             name = "NVIDIA-CUDA" if vendor == "nvidia" else "AMD-ROCm"
             later = ("\n\nWenn Sie das jetzt nicht tun, können Sie es jederzeit unter "
                      "Einstellungen → GPU-Laufzeiten und Treiber nachholen.")
             gpus = f" ({', '.join(offer.gpus)})" if offer.gpus else ""
             if not offer.possible:
-                QMessageBox.information(
-                    self, "GPU-Unterstützung",
-                    f"Auf diesem Computer wurden {name}-Treiber gefunden{gpus}.\n\n{offer.reason}."
-                    + (f"\n\n{offer.profile.install_hint}" if offer.profile.install_hint else "") + later)
-                continue
+                issues, osi = getattr(self, "_driver_issues", ([], None))
+                rocm_issue = next((i for i in issues if i.id == "rocm"), None) if vendor == "amd" else None
+                box = QMessageBox(self)
+                box.setWindowTitle("GPU-Unterstützung")
+                box.setIcon(QMessageBox.Information)
+                box.setText(f"Auf diesem Computer wurde {'eine AMD-Grafik' if vendor == 'amd' else f'ein {name}-Treiber'}"
+                            f" gefunden{gpus}.\n\n{offer.reason}.")
+                box.setInformativeText(
+                    (f"{offer.profile.install_hint}\n\n" if offer.profile.install_hint else "")
+                    + ("Die Anleitung zeigt, wie Sie das mit einem Befehl einrichten." if rocm_issue else "")
+                    + later)
+                show = box.addButton("Anleitung anzeigen", QMessageBox.AcceptRole) if rocm_issue else None
+                box.addButton("OK" if show is None else "Nicht jetzt", QMessageBox.RejectRole)
+                box.exec()
+                if show is not None and box.clickedButton() is show:
+                    self.show_driver_guide(rocm_issue, osi)
+                return  # one message per start
             box = QMessageBox(self)
             box.setWindowTitle("GPU-Unterstützung verfügbar")
             box.setIcon(QMessageBox.Question)
-            box.setText(f"Auf diesem Computer wurden {name}-Treiber gefunden{gpus}.\n\n"
+            found = (f"eine AMD-Grafik gefunden, die ROCm 10 unterstützt{gpus}" if vendor == "amd"
+                     else f"{name}-Treiber gefunden{gpus}")
+            box.setText(f"Auf diesem Computer wurde{'n' if vendor != 'amd' else ''} {found}.\n\n"
                         f"Möchten Sie die {name.split('-')[1]}-Unterstützung nachladen?")
             box.setInformativeText(
                 f"{offer.profile.title}: Die KI-Funktionen laufen damit über die für Ihre Grafikkarte "
@@ -1201,7 +1222,7 @@ class MainWindow(QMainWindow):
         if issues:
             lay.addWidget(QLabel("<b>GPU-Laufzeiten</b>"))
         if not offers and not installed:
-            lay.addWidget(QLabel("Keine NVIDIA-CUDA- oder AMD-ROCm-Treiber gefunden."))
+            lay.addWidget(QLabel("Keine NVIDIA-CUDA-Treiber und keine AMD-Grafik mit Rechentreiber (/dev/kfd) gefunden."))
         for o in offers:
             row = QHBoxLayout()
             gpus = f" – {', '.join(o.gpus)}" if o.gpus else ""

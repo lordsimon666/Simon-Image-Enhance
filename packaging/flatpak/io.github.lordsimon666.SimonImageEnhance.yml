@@ -10,7 +10,7 @@ finish-args:
   - --share=ipc
   - --socket=wayland
   - --socket=fallback-x11
-  - --device=dri
+  - --device=all   # /dev/dri plus /dev/kfd (AMD ROCm 10) and /dev/accel (Intel NPU)
   - --filesystem=home
   - --filesystem=xdg-pictures
   - --filesystem=/media

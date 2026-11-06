@@ -4,7 +4,8 @@ Fedora, Ubuntu/Mint/Pop!_OS, Debian, Arch family, openSUSE, generic).
 
 Detection looks at the PCI bus (works without any driver) and compares it with what
 the app can actually use (NVIDIA driver/libcuda, Vulkan devices, ROCm, Intel compute
-runtime, Intel NPU via OpenVINO).
+runtime, Intel NPU via OpenVINO). AMD ROCm 10 is downloaded by the app itself, so for
+AMD only the kernel driver and access to /dev/kfd matter.
 """
 
 from __future__ import annotations
@@ -21,6 +22,9 @@ _NPU_CLASS = 0x1200  # "processing accelerator" (Intel NPU / VPU)
 DOCS = {
     "bazzite": "https://docs.bazzite.gg",
     "bazzite_images": "https://bazzite.gg/#image-picker",
+    "bazzite_rebase": "https://docs.bazzite.gg/Installing_and_Managing_Software/Updates_Rollbacks_and_Rebasing/rebase_guide/",
+    "bazzite_secure_boot": "https://docs.bazzite.gg/General/Installation_Guide/secure_boot/",
+    "bazzite_layering": "https://docs.bazzite.gg/Installing_and_Managing_Software/rpm-ostree/",
     "ublue": "https://universal-blue.org",
     "rpmfusion_nvidia": "https://rpmfusion.org/Howto/NVIDIA",
     "ubuntu_nvidia": "https://ubuntu.com/server/docs/nvidia-drivers-installation",
@@ -28,7 +32,7 @@ DOCS = {
     "arch_nvidia": "https://wiki.archlinux.org/title/NVIDIA",
     "opensuse_nvidia": "https://en.opensuse.org/SDB:NVIDIA_drivers",
     "nvidia": "https://www.nvidia.com/drivers",
-    "rocm": "https://rocm.docs.amd.com/projects/install-on-linux/en/latest/",
+    "rocm": "https://rocm.docs.amd.com/en/latest/",
     "intel_npu": "https://github.com/intel/linux-npu-driver",
     "intel_compute": "https://github.com/intel/compute-runtime",
 }
@@ -140,11 +144,22 @@ def pci_devices(root: str = "/") -> list[PciDevice]:
 
 @dataclass
 class Issue:
-    id: str          # nvidia_driver | rocm | vulkan | intel_compute | intel_npu
+    id: str          # nvidia_driver | rocm | vulkan_* | intel_compute | intel_npu
     title: str
     message: str
     benefit: str
     optional: bool = False
+    device: int = 0  # PCI device id (NVIDIA: picks the right driver generation)
+
+
+def nvidia_generation(device_id: int) -> str:
+    """'open' (Turing and newer: GTX 16xx, RTX), 'legacy' (Maxwell, Pascal, Volta) or 'kepler'
+    (and older - no longer supported by current NVIDIA drivers), from the PCI device id."""
+    if device_id >= 0x1E00:
+        return "open"
+    if device_id >= 0x1340:
+        return "legacy"
+    return "kepler"
 
 
 @dataclass
@@ -152,7 +167,8 @@ class Facts:
     """What the app can use right now (injected in tests)."""
     libcuda: bool = False
     vulkan_vendors: set = field(default_factory=set)  # PCI vendor ids of real Vulkan GPUs
-    rocm7: bool = False
+    kfd_access: bool = False                          # /dev/kfd usable (AMD compute)
+    amd_gfx: list = field(default_factory=list)       # gfx targets reported by the kernel driver
     opencl_gpu: bool = False
     openvino_npu: bool = False
     openvino_gpu: bool = False
@@ -160,8 +176,9 @@ class Facts:
 
 def current_facts() -> Facts:
     from . import runtimes
+    rocm = runtimes.rocm_driver() or {}
     f = Facts(libcuda=bool(runtimes._find_lib("libcuda.so.1")),
-              rocm7=bool(runtimes._find_lib("libamdhip64.so.7")))
+              kfd_access=bool(rocm.get("access")), amd_gfx=list(rocm.get("gfx") or []))
     try:
         import ncnn  # type: ignore
         for i in range(ncnn.get_gpu_count()):
@@ -194,25 +211,28 @@ def find_issues(devices: list[PciDevice] | None = None, facts: Facts | None = No
     gpus = {d.vendor for d in devices if d.cls in _DISPLAY_CLASSES}
     issues = []
     if NVIDIA in gpus and not facts.libcuda:
+        nv = max((d.device for d in devices if d.vendor == NVIDIA and d.cls in _DISPLAY_CLASSES), default=0)
         issues.append(Issue(
             "nvidia_driver", "NVIDIA-Treiber fehlt",
             "Es wurde eine NVIDIA-Grafikkarte gefunden, aber der NVIDIA-Treiber ist nicht installiert "
             "(es läuft vermutlich der freie Treiber „nouveau“).",
             "Mit dem NVIDIA-Treiber nutzt die App die Grafikkarte für alle KI-Funktionen und Filter – "
-            "auf Wunsch zusätzlich mit CUDA und den Tensor-Kernen."))
+            "auf Wunsch zusätzlich mit CUDA und den Tensor-Kernen.", device=nv))
     for vendor, name in ((AMD, "AMD"), (INTEL, "Intel"), (NVIDIA, "NVIDIA")):
         if vendor in gpus and vendor not in facts.vulkan_vendors and not (vendor == NVIDIA and not facts.libcuda):
             issues.append(Issue(
                 f"vulkan_{name.lower()}", f"Vulkan-Treiber für {name} fehlt",
                 f"Es wurde eine {name}-Grafikkarte gefunden, aber kein Vulkan-Treiber dafür.",
                 "Über Vulkan laufen KI-Funktionen und Filter auf der Grafikkarte."))
-    if AMD in gpus and not facts.rocm7:
+    from .runtimes import PROFILES
+    rocm_ok = not facts.amd_gfx or any(g in PROFILES["rocm10"].devices for g in facts.amd_gfx)
+    if AMD in gpus and rocm_ok and not facts.kfd_access:
         issues.append(Issue(
-            "rocm", "AMD ROCm (optional)",
-            "Für die AMD-Grafikkarte ist ROCm 7 nicht installiert. Die Grafikkarte wird trotzdem bereits "
-            "über Vulkan genutzt.",
-            "ROCm ist AMDs Rechenplattform; damit kann die App die besonders schnelle MIGraphX-Laufzeit "
-            "nachladen.", optional=True))
+            "rocm", "AMD ROCm 10: Zugriff einrichten (optional)",
+            "Die App kann für die AMD-Grafik ROCm 10 selbst nachladen, bekommt aber keinen Zugriff auf "
+            "den Rechentreiber (/dev/kfd). Die Grafikkarte wird trotzdem bereits über Vulkan genutzt.",
+            "Mit ROCm 10 laufen die KI-Modelle über AMDs MIGraphX – auf Radeon RX 7000/9000 und Ryzen-AI-"
+            "Grafik meist deutlich schneller.", optional=True))
     if INTEL in gpus and not facts.openvino_gpu:
         issues.append(Issue(
             "intel_compute", "Intel Compute Runtime (optional)",
@@ -254,12 +274,132 @@ _SECURE_BOOT = ("Bei aktiviertem Secure Boot muss der Schlüssel der selbst geba
                 "registriert werden (siehe RPM-Fusion-Anleitung), sonst lädt der Treiber nicht.")
 
 
-def _ublue_nvidia_image(osi: OSInfo) -> str:
-    base = osi.image_name or ("bazzite" if osi.family == "bazzite" else "bluefin")
-    for suffix in ("-nvidia-open", "-nvidia"):
-        if base.endswith(suffix):
-            base = base[: -len(suffix)]
-    return f"{base}-nvidia-open"
+def _ublue_nvidia_image(osi: OSInfo, gen: str = "open") -> tuple[str, str]:
+    """Image with NVIDIA driver that matches the installed one (same desktop, same edition).
+    Returns (image, note)."""
+    name = osi.image_name or ("bazzite" if osi.family == "bazzite" else "bluefin")
+    if osi.family != "bazzite":
+        base = name.replace("-nvidia-open", "").replace("-nvidia", "")
+        return f"{base}-{'nvidia-open' if gen == 'open' else 'nvidia'}", ""
+    gnome = "gnome" in name
+    if "deck" in name:
+        if gen == "open":
+            return ("bazzite-deck-nvidia-gnome" if gnome else "bazzite-deck-nvidia"), ""
+        return (("bazzite-gnome-nvidia" if gnome else "bazzite-nvidia"),
+                "Für ältere NVIDIA-Karten gibt es kein Handheld-/HTPC-Image (Bazzite-Deck). Vorgeschlagen ist "
+                "daher die Desktop-Ausgabe – sie startet in den normalen Desktop statt in den Steam-Spielmodus.")
+    base = "bazzite-gnome" if gnome else "bazzite"
+    return f"{base}-{'nvidia-open' if gen == 'open' else 'nvidia'}", ""
+
+
+_GEN_TEXT = {"open": "GeForce GTX 16xx / RTX (Turing oder neuer)",
+             "legacy": "GeForce GTX 9xx / 10xx, Titan V (Maxwell, Pascal, Volta)",
+             "kepler": "GeForce GTX 7xx oder älter (Kepler)"}
+
+
+def _ublue_nvidia_guide(g: Guide, osi: OSInfo, issue: Issue) -> None:
+    bazzite = osi.family == "bazzite"
+    distro = "Bazzite" if bazzite else "Universal-Blue-Systemen (Bluefin, Aurora)"
+    gen = nvidia_generation(issue.device) if issue.device else "open"
+    if gen == "kepler":
+        g.intro += (f"\n\nIhre Karte gehört zur Generation {_GEN_TEXT['kepler']}. Dafür gibt es auf {distro} "
+                    "keinen NVIDIA-Treiber mehr – NVIDIA unterstützt diese Karten mit aktuellen Treibern nicht, "
+                    "und der letzte passende Treiber (470) läuft nicht unter Wayland.")
+        g.steps = [Step("Nichts installieren: Die Karte läuft weiter mit dem freien Treiber nouveau. Die App "
+                        "nutzt sie über den freien Vulkan-Treiber (NVK), soweit Mesa ihn für die Karte "
+                        "bereitstellt, sonst rechnet sie auf dem Prozessor.")]
+        g.links = [("Bazzite-FAQ", DOCS["bazzite"] + "/General/FAQ/")] if bazzite else [("Universal Blue", DOCS["ublue"])]
+        return
+    image, note = _ublue_nvidia_image(osi, gen)
+    tag = osi.image_tag or "stable"
+    g.intro += (f"\n\nAuf {distro} wird der NVIDIA-Treiber nicht einzeln installiert: Er steckt fertig "
+                "getestet in eigenen System-Images, auf die man umsteigt („rebase“). Persönliche Dateien, "
+                "Einstellungen und Apps bleiben erhalten; ein Zurückwechseln ist jederzeit möglich.\n\n"
+                f"Erkannte Karte: {_GEN_TEXT[gen]} → passendes Image: {image}:{tag}")
+    if bazzite:
+        g.steps = [
+            Step("Aktuelles Image und Update-Zweig anzeigen (Bazzite Rollback Helper):", "brh current"),
+            Step(f"Auf das Image mit NVIDIA-Treiber wechseln. Ihre Desktop-Umgebung und der Update-Zweig "
+                 f"„{tag}“ bleiben gleich; es werden einige GB geladen:", f"brh rebase {image}:{tag}"),
+            Step("Gleichwertiger Standardbefehl, falls „brh“ nicht vorhanden ist:",
+                 f"rpm-ostree rebase ostree-image-signed:docker://ghcr.io/ublue-os/{image}:{tag}"),
+            _REBOOT,
+            Step("Nach dem Neustart prüfen – es sollte die Grafikkarte mit Treiberversion erscheinen:", "nvidia-smi"),
+        ]
+        g.notes += [
+            "Den NVIDIA-Treiber aktualisiert Bazzite mit den normalen Systemupdates (Bazzite Updater bzw. "
+            "„ujust update“) – ein manuelles Update ist weder nötig noch möglich.",
+            "Bricht der Wechsel wegen selbst hinzugefügter Pakete ab („rpm-ostree install“), zeigt "
+            "„rpm-ostree status“ diese an; „rpm-ostree reset“ entfernt alle zusätzlichen Pakete.",
+            "Nicht zwischen KDE- und GNOME-Images wechseln – das unterstützt Bazzite nicht. Der Befehl oben "
+            "behält Ihre Desktop-Umgebung bei.",
+            "Secure Boot: Die Treiber in den Bazzite-Images sind mit dem Universal-Blue-Schlüssel signiert. "
+            "Startet Bazzite bei Ihnen bereits mit Secure Boot, ist alles erledigt. Wollen Sie Secure Boot "
+            "erst einschalten, vorher „ujust enroll-secure-boot-key“ ausführen (Passwort: universalblue).",
+            "Zurück zum vorherigen Stand: „brh rollback“ und neu starten.",
+        ]
+        if note:
+            g.notes.insert(0, note)
+        g.links = [("Bazzite: Rebase-Anleitung", DOCS["bazzite_rebase"]),
+                   ("Image-Auswahlhelfer", DOCS["bazzite_images"]),
+                   ("Secure Boot", DOCS["bazzite_secure_boot"])]
+    else:
+        g.steps = [
+            Step("Aktuelles Image anzeigen:", "rpm-ostree status"),
+            Step("Auf das Image mit NVIDIA-Treiber wechseln (einige GB Download):",
+                 f"rpm-ostree rebase ostree-image-signed:docker://ghcr.io/ublue-os/{image}:{tag}"),
+            _REBOOT,
+            Step("Nach dem Neustart prüfen:", "nvidia-smi"),
+        ]
+        g.notes.append("Bitte den Image-Namen mit der Universal-Blue-Dokumentation abgleichen. Zurück zum "
+                       "vorherigen Stand: „rpm-ostree rollback“.")
+        g.links = [("Universal Blue", DOCS["ublue"])]
+
+
+def _rocm_guide(g: Guide, osi: OSInfo) -> None:
+    f = osi.family
+    g.intro += ("\n\nSeit ROCm 10 bringt AMD alle Rechenbibliotheken als Pakete mit, die die App selbst in "
+                "Ihren Benutzerordner lädt (ca. 1 GB Download). ROCm muss also nicht mehr ins System "
+                "installiert werden. Nötig sind nur der amdgpu-Kerneltreiber – in jedem aktuellen Kernel "
+                "enthalten – und das Recht, den Rechentreiber /dev/kfd zu öffnen.")
+    if f == "bazzite":
+        g.intro += ("\n\nAuf Bazzite heißt das: nichts mit „rpm-ostree install“ ins Image aufnehmen. Das "
+                    "System-Image bleibt unverändert, Updates und Rebase laufen weiter wie gewohnt.")
+    g.steps = [Step("Prüfen, ob der Rechentreiber da ist und welche Rechte er hat:", "ls -l /dev/kfd")]
+    if osi.atomic:
+        g.steps += [
+            Step("Zugriff für die Grafikkarte freigeben (udev-Regel nach AMD-Anleitung; sie liegt in /etc und "
+                 "bleibt bei Updates erhalten):",
+                 "printf 'KERNEL==\"kfd\", GROUP=\"render\", MODE=\"0666\"\\nSUBSYSTEM==\"drm\", "
+                 "KERNEL==\"renderD*\", GROUP=\"render\", MODE=\"0666\"\\n' | sudo tee "
+                 "/etc/udev/rules.d/70-amdgpu.rules"),
+            Step("Regel sofort anwenden (oder neu starten):",
+                 "sudo udevadm control --reload-rules && sudo udevadm trigger"),
+        ]
+        g.notes.append("Warum nicht einfach „usermod -a -G render“? Auf atomaren Systemen wie Bazzite stehen die "
+                       "Systemgruppen in /usr/lib/group, deshalb meldet usermod dort oft „Gruppe existiert "
+                       "nicht“. Die udev-Regel umgeht das.")
+    else:
+        g.steps += [
+            Step("Den eigenen Benutzer in die Gruppen „render“ und „video“ aufnehmen:",
+                 "sudo usermod -a -G render,video $LOGNAME"),
+            Step("Abmelden und wieder anmelden (oder neu starten), damit die Gruppen gelten."),
+        ]
+    g.steps.append(Step("Die App neu starten und unter Einstellungen → GPU-Laufzeiten und Treiber "
+                        "„AMD ROCm 10 – MIGraphX“ nachladen."))
+    if osi.flatpak:
+        g.notes.append("Im Flatpak braucht die App dafür Zugriff auf alle Geräte (ist voreingestellt). Falls Sie "
+                       "das z. B. mit Flatseal abgeschaltet haben: "
+                       "„flatpak override --user --device=all io.github.lordsimon666.SimonImageEnhance“.")
+    g.notes.append("ROCm 10 mit ONNX Runtime unterstützt Radeon RX 7000 (gfx1100–1102), RX 9000 (gfx1200/1201) "
+                   "und die Ryzen-AI-Grafik (gfx1150–1153). Ältere Karten wie RX 6000, Radeon 780M oder das "
+                   "Steam Deck laufen weiterhin über Vulkan.")
+    if f in ("ubuntu", "debian"):
+        g.notes.append("Ryzen-AI-Prozessoren (Strix Point / Strix Halo) brauchen Kernel 6.14 oder neuer; unter "
+                       "Ubuntu 24.04 also den HWE- bzw. OEM-Kernel.")
+    if f == "bazzite":
+        g.links = [("Bazzite: Pakete layern (warum nicht nötig)", DOCS["bazzite_layering"])]
+    g.links.append(("AMD ROCm-Dokumentation", DOCS["rocm"]))
 
 
 def _os_label(osi: OSInfo) -> str:
@@ -283,26 +423,7 @@ def guide(issue: Issue, osi: OSInfo) -> Guide:
 
     if issue.id == "nvidia_driver":
         if f in ("bazzite", "ublue"):
-            target = _ublue_nvidia_image(osi)
-            distro = "Bazzite" if f == "bazzite" else "Universal-Blue-Systeme (Bluefin, Aurora)"
-            g.intro += (f"\n\nAuf {distro} wird der NVIDIA-Treiber nicht einzeln installiert: Es gibt fertige "
-                        "Images mit NVIDIA-Treiber, auf die man umsteigt („rebase“). Daten und Einstellungen "
-                        "bleiben erhalten, ein Zurückwechseln ist jederzeit möglich.")
-            if "deck" in osi.image_name:
-                g.notes.append("Die Deck-/Handheld-Images sind für AMD-Geräte gedacht – bitte im "
-                               "Image-Auswahlhelfer das passende Image mit NVIDIA-Treiber wählen.")
-            g.steps = [
-                Step("Passendes Image prüfen: „-nvidia-open“ für GeForce GTX 16xx / RTX 20xx und neuer, "
-                     "„-nvidia“ für ältere Karten (GTX 9xx / 10xx). Im Zweifel den offiziellen "
-                     "Image-Auswahlhelfer verwenden (Link unten)."),
-                Step("Auf das NVIDIA-Image wechseln (Download einige GB, dauert etwas):",
-                     f"rpm-ostree rebase ostree-image-signed:docker://ghcr.io/ublue-os/{target}:{osi.image_tag}"),
-                _REBOOT,
-            ]
-            g.notes.append("Bitte den Befehl mit der offiziellen Bazzite-/Universal-Blue-Dokumentation "
-                           "abgleichen – Image-Namen können sich ändern.")
-            g.links = [("Bazzite-Dokumentation", DOCS["bazzite"]), ("Image-Auswahlhelfer", DOCS["bazzite_images"])] \
-                if f == "bazzite" else [("Universal Blue", DOCS["ublue"])]
+            _ublue_nvidia_guide(g, osi, issue)
         elif f == "fedora-atomic":
             g.steps = [
                 Step("RPM-Fusion-Paketquellen hinzufügen:", f"sudo rpm-ostree install {_RPMFUSION}"),
@@ -361,13 +482,22 @@ def guide(issue: Issue, osi: OSInfo) -> Guide:
             g.steps = [Step("Den NVIDIA-Treiber über die Treiberverwaltung bzw. Paketverwaltung Ihrer "
                             "Distribution installieren und neu starten.")]
             g.links = [("NVIDIA-Treiber", DOCS["nvidia"])]
-        g.notes.append("Nach dem Neustart erkennt die App den Treiber und bietet die CUDA-Unterstützung "
-                       "automatisch an (fehlende CUDA-Bibliotheken lädt sie selbst nach).")
+        if not (f in ("bazzite", "ublue") and issue.device and nvidia_generation(issue.device) == "kepler"):
+            g.notes.append("Nach dem Neustart erkennt die App den Treiber und bietet die CUDA-Unterstützung "
+                           "automatisch an (fehlende CUDA-Bibliotheken lädt sie selbst nach).")
 
     elif issue.id.startswith("vulkan_"):
         vendor = issue.id.split("_", 1)[1]
         if f in ("bazzite", "ublue"):
-            g.steps = [Step("Vulkan ist im Image enthalten – das System aktualisieren:", "ujust update"), _REBOOT]
+            g.intro += ("\n\nDie Vulkan-Treiber sind fester Bestandteil des System-Images und werden mit jedem "
+                        "Update mitgeliefert – einzeln installieren muss (und kann) man sie nicht.")
+            g.steps = [Step("System auf den neuesten Stand bringen:", "ujust update"), _REBOOT]
+            if vendor == "nvidia":
+                g.steps.insert(0, Step("Prüfen, ob ein Image mit NVIDIA-Treiber läuft (Name endet auf "
+                                       "„-nvidia“ oder „-nvidia-open“):",
+                                       "brh current" if f == "bazzite" else "rpm-ostree status"))
+            g.notes.append("Läuft die App als Flatpak, zusätzlich „flatpak update“ ausführen: Die Grafiktreiber "
+                           "im Flatpak kommen aus der Flatpak-Laufzeit.")
         elif f in ("fedora", "fedora-atomic"):
             tool = "sudo rpm-ostree install" if f == "fedora-atomic" else "sudo dnf install"
             g.steps = [Step("Vulkan-Treiber installieren:", f"{tool} mesa-vulkan-drivers vulkan-loader")]
@@ -384,34 +514,15 @@ def guide(issue: Issue, osi: OSInfo) -> Guide:
             g.steps = [Step("Das Mesa-Vulkan-Paket Ihrer Distribution installieren (oft „mesa-vulkan-drivers“).")]
 
     elif issue.id == "rocm":
-        g.intro += ("\n\nROCm ist groß (mehrere GB) und nicht für jede Distribution und jede Karte offiziell "
-                    "verfügbar. Die App braucht ROCm 7 mit MIGraphX. Ohne ROCm nutzt sie die Grafikkarte "
-                    "weiterhin über Vulkan – für die meisten ist das ausreichend.")
-        if f in ("bazzite", "ublue", "fedora-atomic", "fedora"):
-            tool = "rpm-ostree install" if f != "fedora" else "dnf install"
-            query = "dnf info rocm-hip rocm-runtime" if f == "fedora" else "rpm-ostree search rocm-hip"
-            g.steps = [Step("Prüfen, welche ROCm-Version Ihre Fedora-Version anbietet "
-                            "(die App braucht ROCm 7):", query),
-                       Step("Falls ROCm 7 angeboten wird, installieren:",
-                            f"sudo {tool} rocm-hip rocm-runtime rocminfo")]
-            if f != "fedora":
-                g.steps.append(_REBOOT)
-                g.notes.append("Auf atomaren Systemen (Bazzite, Silverblue, Kinoite) wird ROCm als zusätzliche "
-                               "Pakete in das Image „gelayert“; jedes Update dauert danach etwas länger.")
-            g.notes.append("MIGraphX ist nicht in allen Fedora-Versionen enthalten. Ohne MIGraphX bleibt "
-                           "Vulkan der empfohlene Weg.")
-        elif f == "ubuntu":
-            g.steps = [Step("AMD stellt ROCm für Ubuntu LTS offiziell bereit – bitte der AMD-Anleitung folgen "
-                            "(„amdgpu-install“, Anwendungsfall „rocm“) und dabei MIGraphX mitinstallieren.")]
-        else:
-            g.steps = [Step("ROCm 7 mit MIGraphX nach der offiziellen AMD-Anleitung installieren, falls Ihre "
-                            "Distribution unterstützt wird.")]
-        g.links = [("AMD ROCm: Installation unter Linux", DOCS["rocm"])]
+        _rocm_guide(g, osi)
 
     elif issue.id == "intel_compute":
         if f in ("bazzite", "ublue", "fedora-atomic"):
-            g.steps = [Step("Intel Compute Runtime ins Image aufnehmen:",
-                            "sudo rpm-ostree install intel-compute-runtime oneapi-level-zero"), _REBOOT]
+            g.steps = [Step("Prüfen, ob die Runtime schon im Image ist:", "rpm -q intel-compute-runtime"),
+                       Step("Falls nicht: Runtime ins Image aufnehmen („layern“):",
+                            "rpm-ostree install intel-compute-runtime oneapi-level-zero"), _REBOOT]
+            g.notes.append("Zusätzlich gelayerte Pakete können Updates und einen späteren Rebase aufhalten. "
+                           "Wieder entfernen: „rpm-ostree uninstall intel-compute-runtime oneapi-level-zero“.")
         elif f == "fedora":
             g.steps = [Step("Intel Compute Runtime installieren:", "sudo dnf install intel-compute-runtime oneapi-level-zero")]
         elif f in ("ubuntu", "debian"):

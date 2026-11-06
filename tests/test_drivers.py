@@ -73,20 +73,70 @@ def test_issues_amd_and_intel():
     issues = {i.id: i for i in D.find_issues(devs, _facts(vulkan_vendors={D.AMD, D.INTEL}))}
     assert set(issues) == {"rocm", "intel_compute", "intel_npu"}
     assert all(i.optional for i in issues.values())        # nothing blocks the GPU: no pop-up
-    issues = {i.id for i in D.find_issues(devs, _facts(vulkan_vendors=set(), rocm7=True,
+    issues = {i.id for i in D.find_issues(devs, _facts(vulkan_vendors=set(), kfd_access=True,
                                                        openvino_gpu=True, openvino_npu=True))}
     assert issues == {"vulkan_amd", "vulkan_intel"}
+    # an AMD GPU that ROCm 10 does not support (Steam Deck): nothing to set up
+    deck = [D.PciDevice(D.AMD, 0x163F, 0x0300)]
+    assert D.find_issues(deck, _facts(vulkan_vendors={D.AMD}, amd_gfx=["gfx1033"])) == []
+    assert [i.id for i in D.find_issues(deck, _facts(vulkan_vendors={D.AMD}, amd_gfx=["gfx1201"]))] == ["rocm"]
 
 
-def test_bazzite_nvidia_guide_uses_rebase_to_matching_image(tmp_path):
-    for image, target in (("bazzite", "bazzite-nvidia-open"), ("bazzite-gnome", "bazzite-gnome-nvidia-open"),
-                          ("bazzite-nvidia", "bazzite-nvidia-open")):
-        osi = D.read_os(make_root(tmp_path / image, BAZZITE, {"image-name": image, "image-tag": "testing"}, True))
-        g = D.guide(D.find_issues([D.PciDevice(D.NVIDIA, 1, 0x0300)], _facts())[0], osi)
-        cmds = [s.command for s in g.steps if s.command]
-        assert f"ghcr.io/ublue-os/{target}:testing" in cmds[0] and cmds[0].startswith("rpm-ostree rebase")
-        assert not any("dnf" in c for c in cmds)                   # never dnf on an image-based system
-        assert any("docs.bazzite.gg" in u for _t, u in g.links)
+RTX4070, GTX1080, GTX780 = 0x2786, 0x1B80, 0x1004
+
+
+@pytest.mark.parametrize("image,dev,target", [
+    ("bazzite", RTX4070, "bazzite-nvidia-open"),
+    ("bazzite-gnome", RTX4070, "bazzite-gnome-nvidia-open"),
+    ("bazzite-nvidia", RTX4070, "bazzite-nvidia-open"),
+    ("bazzite", GTX1080, "bazzite-nvidia"),                 # Pascal: legacy image
+    ("bazzite-gnome", GTX1080, "bazzite-gnome-nvidia"),
+    ("bazzite-deck", RTX4070, "bazzite-deck-nvidia"),       # handheld/HTPC edition with NVIDIA
+    ("bazzite-deck-gnome", RTX4070, "bazzite-deck-nvidia-gnome"),
+    ("bazzite-deck", GTX1080, "bazzite-nvidia"),            # no legacy deck image: desktop edition
+])
+def test_bazzite_nvidia_guide_uses_rebase_to_matching_image(tmp_path, image, dev, target):
+    osi = D.read_os(make_root(tmp_path, BAZZITE, {"image-name": image, "image-tag": "testing"}, True))
+    g = D.guide(D.find_issues([D.PciDevice(D.NVIDIA, dev, 0x0300)], _facts())[0], osi)
+    cmds = [s.command for s in g.steps if s.command]
+    assert cmds[0] == "brh current"
+    assert f"brh rebase {target}:testing" in cmds
+    assert f"rpm-ostree rebase ostree-image-signed:docker://ghcr.io/ublue-os/{target}:testing" in cmds
+    assert "nvidia-smi" in cmds
+    assert not any("dnf" in c or "rpm-ostree install" in c for c in cmds)  # never layer the driver
+    assert any("docs.bazzite.gg" in u for _t, u in g.links)
+    assert any("brh rollback" in n for n in g.notes) and any("enroll-secure-boot-key" in n for n in g.notes)
+    assert ("Desktop-Ausgabe" in " ".join(g.notes)) == ("deck" in image and target.startswith("bazzite-") and "deck" not in target)
+
+
+def test_bazzite_kepler_gets_no_rebase(tmp_path):
+    osi = D.read_os(make_root(tmp_path, BAZZITE, {"image-name": "bazzite"}, True))
+    g = D.guide(D.find_issues([D.PciDevice(D.NVIDIA, GTX780, 0x0300)], _facts())[0], osi)
+    assert not any("rebase" in s.command for s in g.steps) and "Kepler" in g.intro
+
+
+def test_nvidia_generation():
+    assert D.nvidia_generation(0x2786) == "open" and D.nvidia_generation(0x2182) == "open"   # RTX 4070, GTX 1660 Ti
+    assert D.nvidia_generation(0x1B80) == "legacy" and D.nvidia_generation(0x1381) == "legacy"  # GTX 1080, 750 Ti
+    assert D.nvidia_generation(0x1004) == "kepler"
+
+
+@pytest.mark.parametrize("rel,info,ostree,expect,avoid", [
+    (BAZZITE, {"image-name": "bazzite"}, True, "udev", "usermod"),
+    ({"ID": "fedora", "VARIANT_ID": "silverblue"}, None, True, "udev", "usermod"),
+    ({"ID": "ubuntu", "ID_LIKE": "debian"}, None, False, "usermod -a -G render,video", "udev"),
+    ({"ID": "arch"}, None, False, "usermod -a -G render,video", "rpm-ostree"),
+])
+def test_rocm10_guide(tmp_path, rel, info, ostree, expect, avoid):
+    osi = D.read_os(make_root(tmp_path, rel, info, ostree))
+    issue = D.find_issues([D.PciDevice(D.AMD, 0x7550, 0x0300)], _facts(vulkan_vendors={D.AMD}))[0]
+    g = D.guide(issue, osi)
+    cmds = " ".join(s.command for s in g.steps)
+    assert issue.id == "rocm" and "ls -l /dev/kfd" in cmds and expect in cmds and avoid not in cmds
+    assert "rpm-ostree install" not in cmds and "dnf" not in cmds   # ROCm 10 comes with the app
+    assert "ROCm 10" in g.intro
+    if osi.family == "bazzite":
+        assert "Image bleibt unverändert" in g.intro.replace("System-Image bleibt unverändert", "Image bleibt unverändert")
 
 
 @pytest.mark.parametrize("rel,ostree,expect,avoid", [
@@ -101,7 +151,7 @@ def test_bazzite_nvidia_guide_uses_rebase_to_matching_image(tmp_path):
 ])
 def test_nvidia_guides_per_distribution(tmp_path, rel, ostree, expect, avoid):
     osi = D.read_os(make_root(tmp_path, rel, None, ostree))
-    issue = D.find_issues([D.PciDevice(D.NVIDIA, 1, 0x0300)], _facts())[0]
+    issue = D.find_issues([D.PciDevice(D.NVIDIA, RTX4070, 0x0300)], _facts())[0]
     cmds = " ".join(s.command for s in D.guide(issue, osi).steps)
     assert expect in cmds and avoid not in cmds
 

@@ -198,6 +198,11 @@ class MainWindow(QMainWindow):
         self.show_before = False
         self.current_path: str | None = None
         self._tasks = set()
+        # the AI engine reports "checking the GPU (once) ..." from worker threads
+        self._ai_sig = _Signals()
+        self._ai_sig.progress.connect(lambda _n, msg: self.statusBar().showMessage(msg, 15000))
+        from .ai import engine as _ai_engine
+        _ai_engine.activity_hook = lambda msg: self._ai_sig.progress.emit(0, msg)
         self._block_key = False
 
         self.render_timer = QTimer(self)
@@ -1279,7 +1284,7 @@ class MainWindow(QMainWindow):
             p.key_enabled, p.key_mode, p.key_mask = 1.0, 1.0, key
             self._set_params(p)
             self.statusBar().showMessage(
-                f"Hintergrund entfernt (BiRefNet) – berechnet auf {ai_features.used_device('birefnet')}. "
+                f"Hintergrund entfernt (BiRefNet) – berechnet auf {self._ai_device_text('birefnet')}. "
                 "PNG-Export behält die Transparenz.", 8000)
 
         self._run_with_progress("Hintergrund wird erkannt …", job, done, determinate=False)
@@ -1325,11 +1330,23 @@ class MainWindow(QMainWindow):
 
         def done(path):
             self.store.set(path, params)
-            used = ai_features.used_device("scunet" if denoise else "realesr")
+            used = self._ai_device_text("scunet" if denoise else "realesr")
             self._pending_status = f"Gespeichert: {os.path.basename(path)} – berechnet auf {used}"
             self.open_paths([path])
 
         self._run_with_progress(f"KI-Verbessern: {os.path.basename(src)} …", job, done)
+
+    @staticmethod
+    def _ai_device_text(model_id: str) -> str:
+        """Device the model ran on - and why a GPU was skipped, if it ran on the CPU."""
+        from .ai import engine as ai_engine
+        dev = ai_engine.last_device(model_id)
+        txt = ai_engine.describe(dev)
+        if dev is not None and dev.kind == "cpu":
+            why = ai_engine.fallback_reasons(model_id)
+            if why:
+                txt += " – Grafikkarte nicht genutzt: " + "; ".join(f"{l}: {r}" for l, r in why[:2])
+        return txt
 
     def apply_ai_selected(self):
         paths = self._selected_paths()
@@ -1597,33 +1614,77 @@ def apply_dark_theme(app: QApplication):
 def main(argv=None):
     argv = list(sys.argv if argv is None else argv)
     # a downloaded CUDA / ROCm ONNX Runtime must be hooked in before anything imports it
+    diag = ("--ai-info", "--gpu-info", "--net-check", "--version")
+    if any(f in argv for f in diag) and (sys.stdout is None or os.environ.get("SIE_DIAG_FILE")):
+        # Windows build has no console: write the diagnostics to a file instead
+        from .store import data_dir
+        path = os.environ.get("SIE_DIAG_FILE") or os.path.join(data_dir(), "diagnose.txt")
+        sys.stdout = sys.stderr = open(path, "w", encoding="utf-8", buffering=1)
     from . import runtimes
     runtimes.activate()
+    if "--ai-probe" in argv:  # child process of the crash-safe device check (see ai/engine.py)
+        from .ai import engine as ai_engine
+        i = argv.index("--ai-probe")
+        return ai_engine.probe_main(argv[i + 1:i + 4])
     if "--gpu-info" in argv:  # quick diagnostics: is the GPU usable?
         print(gpu.status())
         return 0 if gpu.available() else 1
-    if "--ai-info" in argv:  # diagnostics: which accelerators can run the AI models?
+    if "--ai-info" in argv:  # diagnostics: which accelerators can run which AI model?
         from .ai import engine as ai_engine, models as ai_models
-        import numpy as _np
+        print(f"{APP_TITLE} {__version__}")
         print(gpu.status())
-        ai_engine.discover()
         print(runtimes.status())
         for o in runtimes.detect():
             print(f"Erkannt: {o.profile.title} – {o.reason}" + ("" if o.possible else " (nicht nachladbar)"))
+        if "--download" in argv:
+            from . import net
+            for k in ai_models.MODELS:
+                if not ai_models.is_available(k):
+                    try:
+                        ai_models.download(k)
+                    except Exception as exc:  # noqa: BLE001
+                        print(f"Download {k} fehlgeschlagen: {net.describe_error(exc)}")
+        models = [k for k in ai_models.MODELS if ai_models.is_available(k)]
         devices = ai_engine.discover()
-        print("KI-Beschleuniger:")
+        print("KI-Beschleuniger (jedes Gerät wird in einem eigenen Prozess geprüft):")
         for d in devices:
-            ai_engine.set_preferred(d.id)
-            ai_engine.reset()
-            try:
-                ai_engine.run("realesr", _np.random.rand(1, 3, 64, 64).astype(_np.float32))
-                used = ai_engine.last_device("realesr")
-                ok = "funktioniert" if used and used.id == d.id else "Rückfall auf CPU"
-            except Exception as exc:  # noqa: BLE001
-                ok = f"Fehler: {exc}"
-            print(f"  {ai_engine.describe(d):60s} {ok}")
+            print(f"  {ai_engine.describe(d)}")
+            for k in models:
+                if d.kind == "cpu":
+                    print(f"      {k:9s} Referenz")
+                    continue
+                if d.runtime == "ncnn" and not ai_models.MODELS[k].ncnn:
+                    continue
+                r = ai_engine._run_probe(k, d)
+                if r.get("ok"):
+                    extra = f" ({r['seconds']} s erster Durchlauf)" if r.get("seconds") is not None else ""
+                    print(f"      {k:9s} funktioniert{extra}")
+                else:
+                    print(f"      {k:9s} NICHT nutzbar: {r.get('reason')}")
         print("Modelle:", ", ".join(f"{m.title}: {'installiert' if ai_models.is_available(k) else 'wird bei Bedarf geladen'}"
                                      for k, m in ai_models.MODELS.items()))
+        if "--download" in argv and ai_models.is_available("scunet"):  # end-to-end: denoise a photo
+            import tempfile
+            import numpy as _np
+            from PIL import Image as _Image
+            from .ai import features as ai_features
+            with tempfile.TemporaryDirectory() as tmp:
+                src = os.path.join(tmp, "test.png")
+                rng = _np.random.default_rng(1)
+                yy, xx = _np.mgrid[0:300, 0:400] / 300.0
+                img = _np.stack([0.5 + 0.3 * _np.sin(xx * 6), 0.4 + 0.3 * yy, 0.5 + 0.2 * _np.cos(yy * 5)], -1)
+                img = _np.clip(img + rng.normal(0, 0.05, img.shape), 0, 1)
+                _Image.fromarray((img * 255).astype(_np.uint8)).save(src)
+                dst = ai_features.enhance_output_path(src, True, 1)
+                try:
+                    ai_features.enhance(src, dst, 0.8, 1)
+                    print(f"Entrauschen (Ende-zu-Ende): OK – {os.path.getsize(dst)} Bytes, "
+                          f"berechnet auf {ai_engine.describe(ai_engine.last_device('scunet'))}")
+                    for label, why in ai_engine.fallback_reasons("scunet"):
+                        print(f"  übersprungen: {label}: {why}")
+                except Exception as exc:  # noqa: BLE001
+                    print(f"Entrauschen (Ende-zu-Ende): FEHLER – {exc}")
+                    return 1
         return 0
     if "--net-check" in argv:  # diagnostics: do HTTPS downloads work (certificates)?
         from . import net

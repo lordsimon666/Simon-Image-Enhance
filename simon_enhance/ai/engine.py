@@ -21,7 +21,10 @@ model (NPUs only support some operators, memory limits, ...) the next one is use
 
 from __future__ import annotations
 
+import json
 import os
+import subprocess
+import sys
 import threading
 from dataclasses import dataclass
 
@@ -47,6 +50,9 @@ _devices: list[Device] | None = None
 _sessions: dict = {}
 _failed: set = set()
 _last_used: dict = {}
+_reasons: dict = {}          # (model, device id) -> why the device was not used
+_probed: set = set()         # (model, device id) checked in this process
+activity_hook = None         # callable(str): "preparing the GPU ..." messages for the UI
 _preferred = {"id": "auto"}
 
 
@@ -172,7 +178,7 @@ def discover(refresh: bool = False) -> list[Device]:
             if "CUDAExecutionProvider" in prov:
                 devs.append(Device("ort:cuda:0", f"{gpu_name or 'NVIDIA GPU'} (CUDA)", "dgpu", "onnxruntime",
                                    tensor_cores=True))
-            if "MIGraphXExecutionProvider" in prov:
+            if "MIGraphXExecutionProvider" in prov or _plugin_devices(ort, "MIGraphXExecutionProvider"):
                 devs.append(Device("ort:migraphx:0", _amd_label(), "dgpu", "onnxruntime"))
             if "WebGpuExecutionProvider" in prov:
                 gpus = _vulkan_gpus()
@@ -359,6 +365,9 @@ def run(model_id: str, x: np.ndarray, validate=None) -> np.ndarray:
     errors = []
     with _lock:
         for dev in candidates(model_id):
+            if not _probe_ok(model_id, dev):
+                errors.append(f"{dev.label}: {_reasons.get((model_id, dev.id), 'Prüfung fehlgeschlagen')}")
+                continue
             try:
                 y = _runner(model_id, dev, x.shape)(x)
                 if not np.all(np.isfinite(y)) or (validate is not None and not validate(y)):
@@ -367,9 +376,178 @@ def run(model_id: str, x: np.ndarray, validate=None) -> np.ndarray:
                 return y
             except Exception as exc:  # remember and fall back to the next device
                 _failed.add((model_id, dev.id))
+                _reasons[(model_id, dev.id)] = _short(exc)
                 _sessions.pop((model_id, dev.id, x.shape), None)
                 errors.append(f"{dev.label}: {exc}")
     raise RuntimeError("Kein Gerät konnte das Modell ausführen:\n" + "\n".join(errors))
+
+
+def _short(exc) -> str:
+    text = str(exc).strip().splitlines()
+    return (text[0] if text else type(exc).__name__)[:300]
+
+
+def fallback_reasons(model_id: str) -> list[tuple[str, str]]:
+    """[(device label, reason)] of devices that were skipped for this model."""
+    labels = {d.id: d.label for d in discover()}
+    return [(labels.get(dev, dev), r) for (m, dev), r in _reasons.items() if m == model_id]
+
+
+# ---------------------------------------------------------------------------
+# crash-safe device check: GPU drivers can crash the whole process (segfault in the
+# Vulkan / ROCm / DirectML driver). Before a GPU is used for a model the first time,
+# one tile is computed in a separate process and compared with the CPU result.
+# ---------------------------------------------------------------------------
+
+PROBE_TIMEOUT = 900   # MIGraphX compiles the model on first use - can take minutes
+
+
+def probe_shape(model_id: str) -> tuple:
+    info = M.MODELS[model_id]
+    h, w = info.fixed if info.fixed else (info.tile, info.tile)
+    return (1, 3, h, w)
+
+
+def probe_input(shape) -> np.ndarray:
+    """Deterministic photo-like test tile (gradients, edges, a little noise)."""
+    _n, _c, h, w = shape
+    y, x = np.mgrid[0:h, 0:w].astype(np.float32)
+    img = np.stack([0.5 + 0.35 * np.sin(x / max(w, 1) * 7), 0.3 + 0.5 * y / max(h, 1),
+                    0.4 + 0.3 * np.cos((x + y) / max(h + w, 1) * 9)])
+    img[:, h // 4:h // 2, w // 4:w // 2] = np.array([0.9, 0.8, 0.2], np.float32)[:, None, None]
+    img += np.random.default_rng(7).normal(0, 0.03, img.shape).astype(np.float32)
+    return np.clip(img, 0, 1)[None].astype(np.float32)
+
+
+def compare(y: np.ndarray, ref: np.ndarray) -> float:
+    """Relative difference of a device result to the CPU reference."""
+    if model_out_bad(y) or y.shape != ref.shape:
+        return float("inf")
+    return float(np.abs(y - ref).mean() / (np.abs(ref).mean() + 1e-3))
+
+
+def model_out_bad(y) -> bool:
+    return not isinstance(y, np.ndarray) or not np.all(np.isfinite(y))
+
+
+def _probe_file() -> str:
+    from ..store import data_dir
+    return os.path.join(data_dir(), "ai_probe.json")
+
+
+def _probe_key(model_id: str, dev: Device) -> str:
+    from .. import __version__, runtimes
+    return "|".join([__version__, str(runtimes._state.get("active")), model_id, dev.id, dev.label])
+
+
+def _probe_cache() -> dict:
+    try:
+        return json.load(open(_probe_file(), encoding="utf-8"))
+    except Exception:  # noqa: BLE001
+        return {}
+
+
+def _probe_command(model_id: str, dev_id: str, result: str) -> list:
+    if getattr(sys, "frozen", False):
+        return [sys.executable, "--ai-probe", model_id, dev_id, result]
+    root = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+    return [sys.executable, "-c", "import sys; sys.path.insert(0, sys.argv[1]); "
+            "from simon_enhance import runtimes; runtimes.activate(); from simon_enhance.ai import engine; "
+            "raise SystemExit(engine.probe_main(sys.argv[2:]))", root, model_id, dev_id, result]
+
+
+def _probe_ok(model_id: str, dev: Device) -> bool:
+    if dev.kind == "cpu" or (model_id, dev.id) in _probed or os.environ.get("SIE_AI_PROBE", "1") == "0":
+        return True
+    _probed.add((model_id, dev.id))
+    key = _probe_key(model_id, dev)
+    cache = _probe_cache()
+    res = cache.get(key)
+    if res is None:
+        if activity_hook is not None:
+            try:
+                activity_hook(f"{dev.label} wird für „{M.MODELS[model_id].title}“ geprüft (einmalig) …")
+            except Exception:  # noqa: BLE001
+                pass
+        res = _run_probe(model_id, dev)
+        cache = _probe_cache()
+        cache[key] = res
+        try:
+            with open(_probe_file(), "w", encoding="utf-8") as f:
+                json.dump(cache, f, indent=1, ensure_ascii=False)
+        except OSError:
+            pass
+    if not res.get("ok"):
+        _failed.add((model_id, dev.id))
+        _reasons[(model_id, dev.id)] = res.get("reason", "Prüfung fehlgeschlagen")
+        return False
+    return True
+
+
+def _run_probe(model_id: str, dev: Device) -> dict:
+    import tempfile
+    flags = subprocess.CREATE_NO_WINDOW if os.name == "nt" else 0
+    fd, result = tempfile.mkstemp(prefix="sie-probe-", suffix=".json")
+    os.close(fd)
+    try:
+        try:
+            p = subprocess.run(_probe_command(model_id, dev.id, result), capture_output=True, text=True,
+                               timeout=PROBE_TIMEOUT, creationflags=flags, encoding="utf-8", errors="replace",
+                               stdin=subprocess.DEVNULL)
+        except subprocess.TimeoutExpired:
+            return {"ok": False, "reason": f"keine Antwort nach {PROBE_TIMEOUT // 60} Minuten"}
+        except OSError as exc:
+            return {"ok": True, "reason": f"Prüfung nicht möglich ({exc})"}  # cannot check: just try it
+        try:
+            with open(result, encoding="utf-8") as f:
+                data = f.read().strip()
+            if data:
+                return json.loads(data)
+        except (OSError, ValueError):
+            pass
+    finally:
+        try:
+            os.remove(result)
+        except OSError:
+            pass
+    if p.returncode < 0 or p.returncode > 128 or os.name == "nt" and p.returncode not in (0, 1):
+        code = -p.returncode if p.returncode < 0 else p.returncode
+        return {"ok": False, "reason": f"Treiber ist abgestürzt (Code {code}) – Gerät wird für dieses Modell "
+                                       "nicht verwendet"}
+    tail = ((p.stderr or "").strip().splitlines() or ["unbekannter Fehler"])[-1]
+    return {"ok": False, "reason": tail[:300]}
+
+
+def probe_main(argv) -> int:
+    """Child process: run one tile on the device and on the CPU, print the verdict."""
+    model_id, dev_id, result = argv[0], argv[1], argv[2]
+
+    def out(ok, reason="", **kw):
+        with open(result, "w", encoding="utf-8") as f:
+            json.dump(dict(ok=ok, reason=reason, **kw), f, ensure_ascii=False)
+        return 0
+
+    if os.environ.get("SIE_PROBE_TEST_CRASH") == dev_id:
+        os.abort()  # tests: simulate a driver crash
+    dev = next((d for d in discover() if d.id == dev_id), None)
+    if dev is None:
+        return out(False, "Gerät nicht gefunden")
+    if not M.is_available(model_id):
+        return out(True, "Modell fehlt – ungeprüft")
+    import time
+    x = probe_input(probe_shape(model_id))
+    try:
+        t = time.time()
+        y = _runner(model_id, dev, x.shape)(x)
+        first = time.time() - t
+    except Exception as exc:  # noqa: BLE001
+        return out(False, _short(exc))
+    cpu = next(d for d in discover() if d.kind == "cpu")
+    ref = _runner(model_id, cpu, x.shape)(x)
+    diff = compare(y, ref)
+    if diff > 0.05:
+        return out(False, f"falsches Ergebnis (Abweichung zur CPU {diff:.0%})", diff=diff)
+    return out(True, "", diff=diff, seconds=round(first, 2))
 
 
 # ---------------------------------------------------------------------------
@@ -425,3 +603,5 @@ def reset() -> None:
     with _lock:
         _sessions.clear()
         _failed.clear()
+        _reasons.clear()
+        _probed.clear()

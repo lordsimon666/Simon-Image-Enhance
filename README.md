@@ -68,6 +68,12 @@ Auswahl: *Einstellungen → KI-Beschleuniger*. Prüfen, was auf deinem Rechner f
 simon-image-enhance --ai-info
 ```
 
+`--ai-info` prüft jedes Modell auf jedem Gerät **in einem eigenen Prozess** und nennt den Grund, falls
+ein Gerät nicht geht (Absturz des Treibers, falsches Ergebnis, Fehlermeldung). Dieselbe Prüfung macht
+die App vor der ersten Nutzung einer Grafikkarte für ein Modell (einmalig, Ergebnis wird gemerkt): Stürzt
+der Grafiktreiber dabei ab, stürzt nicht die App ab, sondern das Gerät wird für dieses Modell
+übersprungen. Unter Windows (ohne Konsole) steht die Ausgabe in `%APPDATA%\SimonImageEnhance\diagnose.txt`.
+
 Funktionieren Downloads (Modelle, CUDA/ROCm) nicht, prüft `simon-image-enhance --net-check` die
 HTTPS-Verbindungen. Die App nutzt die Zertifikate des Systems (Fedora/Bazzite: `/etc/pki/tls/certs`,
 Debian/Ubuntu/Arch: `/etc/ssl/certs`) und als Reserve die mitgelieferten von `certifi`;

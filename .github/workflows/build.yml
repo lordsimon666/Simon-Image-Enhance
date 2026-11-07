@@ -65,6 +65,14 @@ jobs:
           Start-Sleep 10
           if ($p.HasExited) { throw "App exited early with code $($p.ExitCode)" }
           Stop-Process $p
+      - name: AI check on Windows (DirectML incl. denoise, each device in its own process)
+        shell: pwsh
+        run: |
+          $env:SIE_DIAG_FILE = "$PWD\diagnose.txt"
+          $p = Start-Process dist\SimonImageEnhance\SimonImageEnhance.exe -ArgumentList "--ai-info","--download" -PassThru -Wait
+          Get-Content diagnose.txt
+          if ($p.ExitCode -ne 0) { throw "--ai-info failed with code $($p.ExitCode)" }
+          if (-not (Select-String -Path diagnose.txt -Pattern "scunet")) { throw "denoise model was not checked" }
       - uses: actions/upload-artifact@v4
         with:
           name: windows

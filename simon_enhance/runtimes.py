@@ -499,6 +499,12 @@ def activate() -> str | None:
     if not os.path.isdir(os.path.join(site, "onnxruntime")):
         _state["error"] = "Laufzeit unvollständig – bitte neu installieren"
         return None
+    if PROFILES[pid].plugin == "onnxruntime_ep_migraphx":
+        # MIGraphX compiles every model for the GPU (minutes for SCUNet); keep the result,
+        # so the crash-safe check in a child process and later runs reuse it
+        cache = os.path.join(runtimes_dir(), pid, "migraphx-cache")
+        os.makedirs(cache, exist_ok=True)
+        os.environ.setdefault("ORT_MIGRAPHX_CACHE_DIR", cache)
     _preload(site, PROFILES[pid])
     finder = _OverrideFinder(site)
     sys.meta_path.insert(0, finder)

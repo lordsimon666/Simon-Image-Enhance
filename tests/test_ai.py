@@ -11,7 +11,8 @@ from simon_enhance.ai import engine as E, models as M
 
 
 @pytest.fixture(autouse=True)
-def fresh_engine(monkeypatch):
+def fresh_engine(monkeypatch, tmp_path):
+    monkeypatch.setattr(E, "_probe_file", lambda: str(tmp_path / "ai_probe.json"))
     E.reset()
     E.set_preferred("auto")
     yield
@@ -230,3 +231,40 @@ def test_webgpu_runner_matches_cpu(monkeypatch):
     assert np.abs(out - ref).mean() < 0.01
     monkeypatch.delenv("SIE_ALLOW_CPU_VULKAN")
     E.discover(refresh=True)
+
+
+def _vulkan_device(monkeypatch):
+    monkeypatch.setenv("SIE_ALLOW_CPU_VULKAN", "1")
+    devs = [d for d in E.discover(refresh=True) if d.kind != "cpu" and d.runtime == "onnxruntime"]
+    if not devs:
+        pytest.skip("kein GPU-Gerät (auch kein Software-Vulkan)")
+    return devs[0]
+
+
+def test_probe_accepts_working_device_and_caches(monkeypatch):
+    dev = _vulkan_device(monkeypatch)
+    r = E._run_probe("realesr", dev)
+    assert r["ok"] and r["diff"] < 0.05, r
+    assert E._probe_ok("realesr", dev)
+    import json
+    cache = json.load(open(E._probe_file()))
+    assert list(cache.values())[0]["ok"]
+
+
+def test_driver_crash_is_contained_and_explained(monkeypatch):
+    """A segfaulting driver must not take the app down: the device is skipped with a reason."""
+    dev = _vulkan_device(monkeypatch)
+    monkeypatch.setenv("SIE_PROBE_TEST_CRASH", dev.id)
+    E.set_preferred(dev.id)
+    out = E.run("realesr", np.random.rand(1, 3, 32, 32).astype(np.float32))
+    assert out.shape == (1, 3, 128, 128)
+    assert E.last_device("realesr").kind == "cpu"
+    reasons = dict(E.fallback_reasons("realesr"))
+    assert "abgestürzt" in reasons[dev.label]
+
+
+def test_wrong_results_are_detected():
+    ref = E.probe_input((1, 3, 64, 64))
+    assert E.compare(ref * 1.001, ref) < 0.01
+    assert E.compare(np.zeros_like(ref), ref) > 0.5           # black output (broken GPU kernel)
+    assert E.compare(ref * np.nan, ref) == float("inf")

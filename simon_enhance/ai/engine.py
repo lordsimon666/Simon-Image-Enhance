@@ -53,6 +53,8 @@ _last_used: dict = {}
 _reasons: dict = {}          # (model, device id) -> why the device was not used
 _probed: set = set()         # (model, device id) checked in this process
 activity_hook = None         # callable(str): "preparing the GPU ..." messages for the UI
+_IN_WORKER = False           # True inside a GPU worker / probe process
+_workers: dict = {}          # device id -> (process, connection)
 _preferred = {"id": "auto"}
 
 
@@ -79,8 +81,11 @@ def _ort():
         ort.set_default_logger_severity(3)
     except Exception:
         pass
-    from .. import runtimes
-    runtimes.register_plugins(ort)  # ROCm 10: MIGraphX is an execution-provider plugin
+    if _IN_WORKER:
+        # ROCm 10: MIGraphX is an execution-provider plugin. It is only loaded in the worker
+        # processes - HIP/HSA in the app process broke Vulkan and crashed it on some systems
+        from .. import runtimes
+        runtimes.register_plugins(ort)
     return ort
 
 
@@ -178,7 +183,8 @@ def discover(refresh: bool = False) -> list[Device]:
             if "CUDAExecutionProvider" in prov:
                 devs.append(Device("ort:cuda:0", f"{gpu_name or 'NVIDIA GPU'} (CUDA)", "dgpu", "onnxruntime",
                                    tensor_cores=True))
-            if "MIGraphXExecutionProvider" in prov or _plugin_devices(ort, "MIGraphXExecutionProvider"):
+            if ("MIGraphXExecutionProvider" in prov or _plugin_devices(ort, "MIGraphXExecutionProvider")
+                    or (not _IN_WORKER and runtimes.plugin_ready())):
                 devs.append(Device("ort:migraphx:0", _amd_label(), "dgpu", "onnxruntime"))
             if "WebGpuExecutionProvider" in prov:
                 gpus = _vulkan_gpus()
@@ -369,7 +375,7 @@ def run(model_id: str, x: np.ndarray, validate=None) -> np.ndarray:
                 errors.append(f"{dev.label}: {_reasons.get((model_id, dev.id), 'Prüfung fehlgeschlagen')}")
                 continue
             try:
-                y = _runner(model_id, dev, x.shape)(x)
+                y = _remote(model_id, dev, x) if _isolated(dev) else _runner(model_id, dev, x.shape)(x)
                 if not np.all(np.isfinite(y)) or (validate is not None and not validate(y)):
                     raise RuntimeError("ungültiges Ergebnis")
                 _last_used[model_id] = dev
@@ -380,6 +386,104 @@ def run(model_id: str, x: np.ndarray, validate=None) -> np.ndarray:
                 _sessions.pop((model_id, dev.id, x.shape), None)
                 errors.append(f"{dev.label}: {exc}")
     raise RuntimeError("Kein Gerät konnte das Modell ausführen:\n" + "\n".join(errors))
+
+
+# ---------------------------------------------------------------------------
+# GPU worker processes: every GPU runs the models in its own process. A crashing
+# driver (segfault in ROCm, Vulkan, DirectML ...) then only ends that process and the
+# app continues on the next device.
+# ---------------------------------------------------------------------------
+
+WORKER_TIMEOUT = 900     # first call may compile the model (MIGraphX: minutes)
+
+
+def _isolated(dev: Device) -> bool:
+    return dev.kind != "cpu" and not _IN_WORKER and os.environ.get("SIE_AI_ISOLATE", "1") != "0"
+
+
+def _worker_main(conn, dev_id: str) -> None:
+    global _IN_WORKER
+    _IN_WORKER = True
+    from .. import runtimes
+    runtimes.activate()
+    while True:
+        try:
+            msg = conn.recv()
+        except (EOFError, OSError):
+            return
+        if msg[0] == "stop":
+            return
+        _cmd, model_id, x = msg
+        if os.environ.get("SIE_WORKER_TEST_CRASH") == dev_id:
+            os.abort()  # tests: driver crash while computing
+        try:
+            dev = next((d for d in discover() if d.id == dev_id), None)
+            if dev is None:
+                raise RuntimeError("Gerät im Hilfsprozess nicht gefunden")
+            conn.send(("ok", _runner(model_id, dev, x.shape)(x)))
+        except Exception as exc:  # noqa: BLE001
+            conn.send(("err", _short(exc)))
+
+
+def _start_worker(dev_id: str):
+    import multiprocessing as mp
+    ctx = mp.get_context("spawn")
+    parent, child = ctx.Pipe()
+    proc = ctx.Process(target=_worker_main, args=(child, dev_id), daemon=True, name=f"sie-gpu-{dev_id}")
+    proc.start()
+    child.close()
+    return proc, parent
+
+
+def _stop_worker(dev_id: str, kill: bool = False) -> None:
+    w = _workers.pop(dev_id, None)
+    if w is None:
+        return
+    proc, conn = w
+    try:
+        if kill:
+            proc.kill()
+        else:
+            conn.send(("stop",))
+        proc.join(5)
+        if proc.is_alive():
+            proc.kill()
+    except Exception:  # noqa: BLE001
+        pass
+
+
+def shutdown_workers() -> None:
+    for dev_id in list(_workers):
+        _stop_worker(dev_id)
+
+
+def _remote(model_id: str, dev: Device, x: np.ndarray) -> np.ndarray:
+    w = _workers.get(dev.id)
+    if w is None or not w[0].is_alive():
+        w = _workers[dev.id] = _start_worker(dev.id)
+    proc, conn = w
+    first = (model_id, dev.id) not in _remote_seen
+    try:
+        conn.send(("run", model_id, np.ascontiguousarray(x, np.float32)))
+        if not conn.poll(WORKER_TIMEOUT if first else WORKER_TIMEOUT // 3):
+            _stop_worker(dev.id, kill=True)
+            raise RuntimeError("Grafikkarte antwortet nicht (Zeitüberschreitung)")
+        status, payload = conn.recv()
+    except (EOFError, OSError, BrokenPipeError):
+        proc.join(3)
+        code = proc.exitcode
+        _workers.pop(dev.id, None)
+        sig = f"Signal {-code}" if code is not None and code < 0 else f"Code {code}"
+        raise RuntimeError(f"Treiber ist abgestürzt ({sig}) – Gerät wird für dieses Modell nicht verwendet")
+    if status != "ok":
+        raise RuntimeError(payload)
+    _remote_seen.add((model_id, dev.id))
+    return payload
+
+
+_remote_seen: set = set()
+import atexit as _atexit  # noqa: E402
+_atexit.register(shutdown_workers)
 
 
 def _short(exc) -> str:
@@ -527,6 +631,8 @@ def probe_main(argv) -> int:
             json.dump(dict(ok=ok, reason=reason, **kw), f, ensure_ascii=False)
         return 0
 
+    global _IN_WORKER
+    _IN_WORKER = True
     if os.environ.get("SIE_PROBE_TEST_CRASH") == dev_id:
         os.abort()  # tests: simulate a driver crash
     dev = next((d for d in discover() if d.id == dev_id), None)
@@ -605,3 +711,5 @@ def reset() -> None:
         _failed.clear()
         _reasons.clear()
         _probed.clear()
+        _remote_seen.clear()
+        shutdown_workers()

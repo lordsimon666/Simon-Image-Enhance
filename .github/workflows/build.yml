@@ -104,6 +104,12 @@ jobs:
           timeout 10 xvfb-run -a dist/SimonImageEnhance/SimonImageEnhance || [ $? -eq 124 ]
           dist/SimonImageEnhance/SimonImageEnhance --gpu-info || true  # no GPU on CI runners
           dist/SimonImageEnhance/SimonImageEnhance --ai-info
+      - name: AI check of the frozen app (GPU worker processes, end-to-end denoise)
+        run: |
+          sudo apt-get install -y mesa-vulkan-drivers libvulkan1
+          # software Vulkan counts as GPU here, so the denoise really runs in a worker process
+          SIE_ALLOW_CPU_VULKAN=1 dist/SimonImageEnhance/SimonImageEnhance --ai-info --download | tee ai.txt
+          grep -q "Entrauschen (Ende-zu-Ende): OK" ai.txt
       - name: Tarball
         run: tar -C dist/SimonImageEnhance -czf dist/SimonImageEnhance-linux.tar.gz .
       - name: .deb

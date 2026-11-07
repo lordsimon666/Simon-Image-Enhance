@@ -268,3 +268,18 @@ def test_wrong_results_are_detected():
     assert E.compare(ref * 1.001, ref) < 0.01
     assert E.compare(np.zeros_like(ref), ref) > 0.5           # black output (broken GPU kernel)
     assert E.compare(ref * np.nan, ref) == float("inf")
+
+
+def test_crash_while_computing_only_ends_the_worker(monkeypatch):
+    """The probe passed, but the driver crashes during the real work: the app survives,
+    the tile is computed on the next device and the reason is kept."""
+    dev = _vulkan_device(monkeypatch)
+    E.set_preferred(dev.id)
+    x = np.random.rand(1, 3, 32, 32).astype(np.float32)
+    ref = E.run("realesr", x)
+    assert E.last_device("realesr").id == dev.id and dev.id in E._workers   # ran in a worker
+    E._stop_worker(dev.id)
+    monkeypatch.setenv("SIE_WORKER_TEST_CRASH", dev.id)
+    out = E.run("realesr", x)
+    assert E.last_device("realesr").kind == "cpu" and np.abs(out - ref).mean() < 0.02
+    assert "abgestürzt" in dict(E.fallback_reasons("realesr"))[dev.label]

@@ -513,6 +513,13 @@ def activate() -> str | None:
     return pid
 
 
+def plugin_ready() -> bool:
+    """An execution-provider plugin (ROCm 10 MIGraphX) is installed and active: the GPU
+    workers will register it. The app process itself never loads it."""
+    pid = _state.get("active")
+    return bool(pid and PROFILES[pid].plugin)
+
+
 def register_plugins(ort) -> list[str]:
     """After 'import onnxruntime': register the execution-provider plugin of the active
     runtime (ROCm 10: MIGraphX). Returns the registered EP names."""

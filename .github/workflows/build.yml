@@ -65,6 +65,12 @@ jobs:
           Start-Sleep 10
           if ($p.HasExited) { throw "App exited early with code $($p.ExitCode)" }
           Stop-Process $p
+      - name: DirectML diagnostics (bundle contents, plain Python vs. frozen app)
+        shell: pwsh
+        run: |
+          Get-ChildItem -Recurse dist\SimonImageEnhance -Include DirectML*.dll,onnxruntime*.dll,onnxruntime_providers*.dll | ForEach-Object { "$($_.FullName) $($_.Length)" }
+          python -c "import onnxruntime as o, os; print(o.__version__, o.get_available_providers()); print(os.listdir(os.path.join(os.path.dirname(o.__file__), 'capi')))"
+          python -c "import onnxruntime as o; o.set_default_logger_severity(0); s = o.InferenceSession('simon_enhance/assets/models/realesr-general-x4v3.onnx', providers=['DmlExecutionProvider']); print('DML session providers:', s.get_providers())" 2>&1 | Select-Object -Last 25
       - name: AI check on Windows (DirectML incl. denoise, each device in its own process)
         shell: pwsh
         run: |

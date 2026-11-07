@@ -1676,7 +1676,7 @@ def main(argv=None):
             with tempfile.TemporaryDirectory() as tmp:
                 src = os.path.join(tmp, "test.png")
                 rng = _np.random.default_rng(1)
-                yy, xx = _np.mgrid[0:300, 0:400] / 300.0
+                yy, xx = _np.mgrid[0:150, 0:200] / 150.0  # fits one 256 tile: quick even on software Vulkan
                 img = _np.stack([0.5 + 0.3 * _np.sin(xx * 6), 0.4 + 0.3 * yy, 0.5 + 0.2 * _np.cos(yy * 5)], -1)
                 img = _np.clip(img + rng.normal(0, 0.05, img.shape), 0, 1)
                 _Image.fromarray((img * 255).astype(_np.uint8)).save(src)

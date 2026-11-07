@@ -135,6 +135,7 @@ jobs:
     # package tests so it does not hold up the build
     needs: linux
     runs-on: ubuntu-22.04
+    timeout-minutes: 20
     steps:
       - uses: actions/download-artifact@v4
         with:

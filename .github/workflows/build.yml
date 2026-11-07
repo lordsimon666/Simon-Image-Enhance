@@ -45,7 +45,6 @@ jobs:
             || echo "::warning::OpenCL-Tests übersprungen: PoCL kennt die CPU dieses Runners nicht"
 
   windows:
-    needs: test
     runs-on: windows-latest
     steps:
       - uses: actions/checkout@v4
@@ -87,7 +86,6 @@ jobs:
             dist/*-Windows-Portable.zip
 
   linux:
-    needs: test
     runs-on: ubuntu-22.04   # oldest supported glibc -> runs on most distros
     steps:
       - uses: actions/checkout@v4
@@ -110,12 +108,6 @@ jobs:
           timeout 10 xvfb-run -a dist/SimonImageEnhance/SimonImageEnhance || [ $? -eq 124 ]
           dist/SimonImageEnhance/SimonImageEnhance --gpu-info || true  # no GPU on CI runners
           dist/SimonImageEnhance/SimonImageEnhance --ai-info
-      - name: AI check of the frozen app (GPU worker processes, end-to-end denoise)
-        run: |
-          sudo apt-get install -y mesa-vulkan-drivers libvulkan1
-          # software Vulkan counts as GPU here, so the denoise really runs in a worker process
-          SIE_ALLOW_CPU_VULKAN=1 dist/SimonImageEnhance/SimonImageEnhance --ai-info --download | tee ai.txt
-          grep -q "Entrauschen (Ende-zu-Ende): OK" ai.txt
       - name: Tarball
         run: tar -C dist/SimonImageEnhance -czf dist/SimonImageEnhance-linux.tar.gz .
       - name: .deb
@@ -137,6 +129,27 @@ jobs:
         with:
           name: linux-bundle
           path: dist/SimonImageEnhance-linux.tar.gz
+
+  linux-ai:
+    # the frozen app runs the AI models in GPU worker processes - checked in parallel to the
+    # package tests so it does not hold up the build
+    needs: linux
+    runs-on: ubuntu-22.04
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          name: linux-bundle
+      - run: sudo apt-get update && sudo apt-get install -y mesa-vulkan-drivers libvulkan1 libegl1 libgl1 libxkbcommon0 libfontconfig1 libdbus-1-3
+      - name: Cache AI models
+        uses: actions/cache@v4
+        with:
+          path: ~/.local/share/SimonImageEnhance/models
+          key: ai-models-frozen-scunet-v1
+      - name: GPU worker processes + end-to-end denoise (software Vulkan counts as GPU here)
+        run: |
+          mkdir app && tar -C app -xzf SimonImageEnhance-linux.tar.gz
+          SIE_ALLOW_CPU_VULKAN=1 app/SimonImageEnhance --ai-info --download --models scunet,realesr | tee ai.txt
+          grep -q "Entrauschen (Ende-zu-Ende): OK" ai.txt
 
   fedora:
     # install the .rpm on a real Fedora: verifies that dnf can resolve all dependencies
@@ -187,7 +200,7 @@ jobs:
 
   release:
     if: startsWith(github.ref, 'refs/tags/v')
-    needs: [windows, linux, fedora, flatpak]
+    needs: [test, windows, linux, linux-ai, fedora, flatpak]
     runs-on: ubuntu-latest
     steps:
       - uses: actions/download-artifact@v4

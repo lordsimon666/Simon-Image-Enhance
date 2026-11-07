@@ -3,7 +3,8 @@
 %global debug_package %{nil}
 %global __os_install_post %{nil}
 %global _build_id_links none
-%define _binary_payload w19.zstdio
+# zstd level 10 on all CPU cores (level 19 took minutes)
+%define _binary_payload w10T0.zstdio
 %{!?_metainfodir: %global _metainfodir %{_datadir}/metainfo}
 
 Name:           simon-image-enhance

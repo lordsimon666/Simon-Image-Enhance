@@ -50,5 +50,5 @@ find "$ROOT/opt" -type d -exec chmod 755 {} +
 
 mkdir -p "$OUT"
 DEB="$OUT/${PKG}_${ARCH}.deb"
-dpkg-deb --root-owner-group --build "$ROOT" "$DEB"
+dpkg-deb --root-owner-group -Zxz -z2 --build "$ROOT" "$DEB"  # xz -2: much faster than the default -6, similar size
 echo "$DEB"

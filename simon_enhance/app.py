@@ -1636,15 +1636,20 @@ def main(argv=None):
         print(runtimes.status())
         for o in runtimes.detect():
             print(f"Erkannt: {o.profile.title} – {o.reason}" + ("" if o.possible else " (nicht nachladbar)"))
+        only = None
+        if "--models" in argv:  # e.g. --models scunet,realesr (CI: keep it short)
+            only = set(argv[argv.index("--models") + 1].split(","))
         if "--download" in argv:
             from . import net
             for k in ai_models.MODELS:
+                if only and k not in only:
+                    continue
                 if not ai_models.is_available(k):
                     try:
                         ai_models.download(k)
                     except Exception as exc:  # noqa: BLE001
                         print(f"Download {k} fehlgeschlagen: {net.describe_error(exc)}")
-        models = [k for k in ai_models.MODELS if ai_models.is_available(k)]
+        models = [k for k in ai_models.MODELS if ai_models.is_available(k) and (not only or k in only)]
         devices = ai_engine.discover()
         print("KI-Beschleuniger (jedes Gerät wird in einem eigenen Prozess geprüft):")
         for d in devices:

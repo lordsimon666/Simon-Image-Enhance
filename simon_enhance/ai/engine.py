@@ -89,6 +89,33 @@ def _ort():
     return ort
 
 
+_STRICT = {}
+
+
+def _strict_session_class(ort):
+    """InferenceSession that raises instead of silently falling back to the CPU when the
+    GPU execution provider cannot be created (ONNX Runtime only prints that error)."""
+    cls = _STRICT.get(id(ort))
+    if cls is None:
+        class StrictSession(ort.InferenceSession):
+            def _create_inference_session(self, *args, **kwargs):
+                self._enable_fallback = False
+                return super()._create_inference_session(*args, **kwargs)
+        cls = _STRICT[id(ort)] = StrictSession
+    return cls
+
+
+def _explain_ep_error(device, exc) -> str:
+    text = str(exc)
+    if "No devices detected that match the filter" in text:
+        what = "keine NPU" if device.kind == "npu" else "keine passende DirectX-12-Grafikkarte"
+        return f"{what} gefunden (Grafiktreiber aktuell?)"
+    if "LoadLibrary failed" in text or "cannot open shared object" in text:
+        return f"Bibliothek fehlt: {text.splitlines()[0][:200]}"
+    first = text.strip().splitlines()[0] if text.strip() else type(exc).__name__
+    return first[:300]
+
+
 def _plugin_devices(ort, ep_name: str) -> list:
     """EP devices of a registered execution-provider plugin (ONNX Runtime >= 1.22)."""
     try:
@@ -298,7 +325,11 @@ class _OrtRunner:
             providers = [("WebGpuExecutionProvider", {}), "CPUExecutionProvider"]
         else:
             providers = ["CPUExecutionProvider"]
-        self.sess = ort.InferenceSession(M.onnx_path(model_id), sess_options=so, providers=providers)
+        cls = ort.InferenceSession if parts[1] == "cpu" else _strict_session_class(ort)
+        try:
+            self.sess = cls(M.onnx_path(model_id), sess_options=so, providers=providers)
+        except Exception as exc:  # noqa: BLE001 - give the real reason, not "not usable"
+            raise RuntimeError(_explain_ep_error(device, exc)) from None
         used = self.sess.get_providers()[0]
         if parts[1] != "cpu" and used == "CPUExecutionProvider":
             raise RuntimeError(f"{device.label}: Laufzeit nicht nutzbar")

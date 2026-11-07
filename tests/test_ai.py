@@ -283,3 +283,18 @@ def test_crash_while_computing_only_ends_the_worker(monkeypatch):
     out = E.run("realesr", x)
     assert E.last_device("realesr").kind == "cpu" and np.abs(out - ref).mean() < 0.02
     assert "abgestürzt" in dict(E.fallback_reasons("realesr"))[dev.label]
+
+
+def test_ep_errors_are_explained():
+    gpu = E.Device("ort:dml:0", "GPU (DirectML)", "dgpu", "onnxruntime")
+    npu = E.Device("ort:dml:npu", "NPU (DirectML)", "npu", "onnxruntime")
+    err = RuntimeError("dml_provider_factory.cc:361 CreateFromDeviceOptions No devices detected that match the filter criteria.")
+    assert "DirectX-12-Grafikkarte" in E._explain_ep_error(gpu, err)
+    assert E._explain_ep_error(npu, err).startswith("keine NPU")
+
+
+def test_strict_session_raises_instead_of_silent_cpu_fallback():
+    ort = E._ort()
+    cls = E._strict_session_class(ort)
+    s = cls(M.onnx_path("realesr"), providers=["CPUExecutionProvider"])
+    assert s.get_providers() == ["CPUExecutionProvider"] and s._enable_fallback is False
